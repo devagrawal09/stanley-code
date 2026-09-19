@@ -10,8 +10,8 @@
  *
  * The CLI writes the job file before it exits and starts a detached worker process. The worker claims jobs one
  * at a time, runs the improvement agent confined to the candidate directory, validates what it produced with the
- * same loader active plugins use, and records a `validated` or `rejected` candidate. Nothing is activated
- * automatically: `promoteCandidate` moves a validated candidate into `.stanley/plugins/` on request.
+ * same loader active workflows use, and records a `validated` or `rejected` candidate. Nothing is activated
+ * automatically: `promoteCandidate` moves a validated candidate into `.stanley/workflows/` on request.
  */
 import { spawn as nodeSpawn } from "node:child_process";
 import { link, mkdir, readdir, readFile, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
@@ -29,9 +29,9 @@ import {
   isImprovementJob,
 } from "../workflows/improve.ts";
 import { collectDiff, statusEntries } from "./git.ts";
-import { cleanupPlugins, discoverPlugins, loadPlugins, PLUGIN_DIRECTORY } from "./plugins.ts";
 import { ensureStateDirectory, STATE_DIRECTORY } from "./recorder.ts";
 import { redactText, safeMessage } from "./redact.ts";
+import { cleanupWorkflows, discoverWorkflows, loadWorkflows, WORKFLOW_DIRECTORY } from "./workflows.ts";
 
 export const IMPROVEMENT_DIRECTORY = `${STATE_DIRECTORY}/improvements`;
 export const CANDIDATE_DIRECTORY = `${STATE_DIRECTORY}/candidates`;
@@ -39,7 +39,7 @@ export const WORKER_FLAG = "--improve-worker";
 
 /**
  * The reference workflow embedded in every improvement brief. It is byte-identical to
- * `examples/plugins/stale-todo-audit.ts` (enforced by a test) and shows the Jev-first shape: deterministic code
+ * `examples/workflows/stale-todo-audit.ts` (enforced by a test) and shows the Jev-first shape: deterministic code
  * gathers bounded evidence, `judge` asks Jev fixed-choice questions, and code decides with fixed thresholds.
  */
 export const EXAMPLE_WORKFLOW = `import { readFile } from "node:fs/promises";
@@ -247,14 +247,14 @@ async function acquireWorkerLock(
   return null;
 }
 
-/** Where plugin files written by a *delegated* task agent are moved instead of being activated. */
+/** Where workflow files written by a *delegated* task agent are moved instead of being activated. */
 export const QUARANTINE_DIRECTORY = `${STATE_DIRECTORY}/quarantine`;
 
 /**
- * Move plugin files out of `.stanley/plugins/` into a timestamped quarantine directory, preserving their
+ * Move workflow files out of `.stanley/workflows/` into a timestamped quarantine directory, preserving their
  * relative paths. Nothing is deleted or rewritten; the caller reports where the files went.
  */
-export async function quarantinePluginFiles(
+export async function quarantineWorkflowFiles(
   root: string,
   paths: readonly string[],
   now: () => Date = () => new Date(),
@@ -265,7 +265,7 @@ export async function quarantinePluginFiles(
     .replace(/\.\d+Z$/, "Z");
   const directory = `${QUARANTINE_DIRECTORY}/${stamp}-${process.pid}`;
   for (const path of paths) {
-    const within = relative(PLUGIN_DIRECTORY, path);
+    const within = relative(WORKFLOW_DIRECTORY, path);
     if (within.startsWith("..") || within === "") continue;
     const destination = join(root, directory, within);
     await mkdir(join(destination, ".."), { recursive: true, mode: 0o700 });
@@ -296,7 +296,7 @@ export function spawnImprovementWorker(options: {
 export interface WorkerOptions {
   readonly root: string;
   readonly agent: CodingAgentPort;
-  /** Ids the candidate must not claim: built-ins plus active plugins. */
+  /** Ids the candidate must not claim: built-ins plus active repository workflows. */
   readonly reservedIds: readonly string[];
   /** Asks the router whether it would select the candidate for the job's request; null when not checkable. */
   readonly routeCheck?: (
@@ -427,13 +427,13 @@ async function runJob(
   const { root } = options;
   const directory = candidateDirectory(job.id);
   await mkdir(join(root, directory), { recursive: true, mode: 0o700 });
-  const existing = (await discoverPlugins(root)).sources.map((source) => source.path);
+  const existing = (await discoverWorkflows(root)).sources.map((source) => source.path);
   await log(`start ${job.id} attempt ${job.attempts}: ${safeMessage(job.request, 200)}`);
   const before = await snapshot(root);
   const instructions = improvementInstructions(job, {
     candidateDirectory: directory,
-    pluginDirectory: PLUGIN_DIRECTORY,
-    existingPlugins: existing,
+    workflowDirectory: WORKFLOW_DIRECTORY,
+    existingWorkflows: existing,
     reservedIds: options.reservedIds,
     exampleWorkflow: EXAMPLE_WORKFLOW,
   });
@@ -478,11 +478,11 @@ async function runJob(
   const { lease: _lease, ...rest } = job;
   await writeJson(jobPath(root, "done", job.id), {
     ...rest,
-    result: { status: record.status, pluginId: record.pluginId, finishedAt: now().toISOString() },
+    result: { status: record.status, workflowId: record.workflowId, finishedAt: now().toISOString() },
   });
   await unlink(jobPath(root, "active", job.id)).catch(() => undefined);
   await log(
-    `${record.status} ${job.id}${record.pluginId ? ` plugin ${record.pluginId}` : ""}: ${record.reasons.join("; ") || "ok"}`,
+    `${record.status} ${job.id}${record.workflowId ? ` workflow ${record.workflowId}` : ""}: ${record.reasons.join("; ") || "ok"}`,
   );
   return record.status;
 }
@@ -501,15 +501,15 @@ async function validateCandidate(
   const quarantined: string[] = [];
   // Loading imports the candidate module and awaits its factory (never `run`). That executes agent-authored
   // top-level code, so the containment check is repeated after loading and cleanup, not only after the agent.
-  const loaded = await loadPlugins({
+  const loaded = await loadWorkflows({
     root,
     directory,
     warn: (message) => quarantined.push(message),
     ...(options.signal ? { signal: options.signal } : {}),
   });
-  await cleanupPlugins(loaded.loaded, () => undefined);
+  await cleanupWorkflows(loaded.loaded, () => undefined);
   const outsideWrites = [...new Set([...agentWrites, ...writesSince(before, await snapshot(root))])];
-  let pluginId: string | null = null;
+  let workflowId: string | null = null;
   let source: string | null = null;
   let duplicateId = false;
   let routing: CandidateChecks["routing"] = "skipped";
@@ -527,16 +527,16 @@ async function validateCandidate(
       );
     const candidate = loaded.loaded.length === 1 ? loaded.loaded[0]! : null;
     if (candidate) {
-      pluginId = candidate.plugin.id;
+      workflowId = candidate.workflow.id;
       source = candidate.source.path;
-      duplicateId = options.reservedIds.includes(candidate.plugin.id);
-      if (duplicateId) reasons.push(`workflow id ${candidate.plugin.id} is already registered`);
+      duplicateId = options.reservedIds.includes(candidate.workflow.id);
+      if (duplicateId) reasons.push(`workflow id ${candidate.workflow.id} is already registered`);
       if (options.routeCheck && reasons.length === 0) {
         const metadata = Object.fromEntries(
-          Object.entries(candidate.plugin).filter(([field]) => !["id", "run", "cleanup"].includes(field)),
+          Object.entries(candidate.workflow).filter(([field]) => !["id", "run", "cleanup"].includes(field)),
         ) as JsonObject;
         const selected = await options.routeCheck(
-          { id: candidate.plugin.id, routing: metadata },
+          { id: candidate.workflow.id, routing: metadata },
           job.request,
         );
         routing = selected === null ? "skipped" : selected ? "selected" : "not_selected";
@@ -549,7 +549,7 @@ async function validateCandidate(
     schema: CANDIDATE_SCHEMA,
     id: job.id,
     status: reasons.length === 0 ? "validated" : "rejected",
-    pluginId,
+    workflowId,
     source,
     request: job.request,
     createdAt: now().toISOString(),
@@ -603,29 +603,29 @@ export class PromotionError extends Error {
 }
 
 /**
- * Activate a validated candidate by moving its workflow into `.stanley/plugins/`. The candidate is loaded again
+ * Activate a validated candidate by moving its workflow into `.stanley/workflows/`. The candidate is loaded again
  * first; duplicate ids and existing destinations refuse rather than overwrite.
  */
 export async function promoteCandidate(
   root: string,
   id: string,
   reservedIds: readonly string[],
-): Promise<{ pluginId: string; destination: string }> {
+): Promise<{ workflowId: string; destination: string }> {
   if (!/^imp_[0-9a-f]{12}$/.test(id)) throw new PromotionError(`invalid candidate id: ${id}`);
   const record = await readCandidate(root, id);
   if (!record) throw new PromotionError(`no candidate record for ${id}`);
   if (record.status !== "validated")
     throw new PromotionError(`candidate ${id} is ${record.status}, not validated`);
   if (!record.source) throw new PromotionError(`candidate ${id} has no workflow source`);
-  const loaded = await loadPlugins({ root, directory: candidateDirectory(id), warn: () => undefined });
-  await cleanupPlugins(loaded.loaded, () => undefined);
+  const loaded = await loadWorkflows({ root, directory: candidateDirectory(id), warn: () => undefined });
+  await cleanupWorkflows(loaded.loaded, () => undefined);
   const candidate = loaded.loaded.length === 1 && loaded.quarantined.length === 0 ? loaded.loaded[0]! : null;
   if (!candidate) throw new PromotionError(`candidate ${id} no longer validates; re-run the improvement`);
-  if (reservedIds.includes(candidate.plugin.id)) {
-    throw new PromotionError(`workflow id ${candidate.plugin.id} is already registered`);
+  if (reservedIds.includes(candidate.workflow.id)) {
+    throw new PromotionError(`workflow id ${candidate.workflow.id} is already registered`);
   }
-  await mkdir(join(root, PLUGIN_DIRECTORY), { recursive: true, mode: 0o700 });
-  const destination = `${PLUGIN_DIRECTORY}/${basename(candidate.source.path)}`;
+  await mkdir(join(root, WORKFLOW_DIRECTORY), { recursive: true, mode: 0o700 });
+  const destination = `${WORKFLOW_DIRECTORY}/${basename(candidate.source.path)}`;
   if (await exists(join(root, destination))) throw new PromotionError(`${destination} already exists`);
   await rename(join(root, candidate.source.path), join(root, destination));
   await writeJson(join(root, candidateDirectory(id), "candidate.json"), {
@@ -633,7 +633,7 @@ export async function promoteCandidate(
     status: "promoted",
     source: destination,
   });
-  return { pluginId: candidate.plugin.id, destination };
+  return { workflowId: candidate.workflow.id, destination };
 }
 
 /** Remove a candidate directory. Used by tests and operators; never called automatically. */

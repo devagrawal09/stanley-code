@@ -6,8 +6,8 @@
  * and turns an agent run into a truthful, workflow-neutral `PromptResult`. `adapters/pi.ts` implements the port
  * with Pi; `adapters/fake-agent.ts` implements it deterministically for tests.
  */
-import type { PromptResult } from "../core/plugin.ts";
 import type { JsonObject } from "../core/types.ts";
+import type { PromptResult } from "../core/workflow.ts";
 import type { RedactionPort } from "./ports.ts";
 
 export type AgentTaskKind = "delegate" | "improve";
@@ -93,7 +93,7 @@ export function delegationInstructions(request: string, input: string | null): s
 export function delegationResult(
   result: AgentRunResult,
   redaction: Pick<RedactionPort, "text">,
-  /** Host-observed caveats to add to `notChecked`, for example a guarded plugin-directory change. */
+  /** Host-observed caveats to add to `notChecked`, for example a guarded workflow-directory change. */
   caveats: readonly string[] = [],
 ): PromptResult {
   const status = result.outcome === "finished" ? "complete" : "incomplete";
