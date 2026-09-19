@@ -11,7 +11,7 @@
  * continues. Duplicate ids are not handled here; registration rejects them.
  */
 import type { Dirent } from "node:fs";
-import { readdir, readFile, realpath, stat } from "node:fs/promises";
+import { readdir, readFile, readlink, realpath, stat } from "node:fs/promises";
 import { extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { tsImport } from "tsx/esm/api";
@@ -231,7 +231,10 @@ export async function discoverWorkflows(
   return { sources, diagnostics };
 }
 
-/** Content hashes of every file under the workflow directory, keyed by repository-relative POSIX path. */
+/**
+ * Content hashes of every file under the workflow directory, keyed by repository-relative POSIX path. A symlink
+ * is fingerprinted by its target and never followed, so a link an agent plants there is detected like a file.
+ */
 export async function workflowDirectoryFingerprint(
   root: string,
   relativeDirectory: string = WORKFLOW_DIRECTORY,
@@ -250,6 +253,9 @@ export async function workflowDirectoryFingerprint(
       const path = join(directory, entry.name);
       if (entry.isDirectory()) await walk(path);
       else if (entry.isFile()) fingerprint.set(toPosix(relative(root, path)), sha256(await readFile(path)));
+      else if (entry.isSymbolicLink()) {
+        fingerprint.set(toPosix(relative(root, path)), sha256(`symlink:${await readlink(path)}`));
+      }
     }
   };
   await walk(join(root, relativeDirectory));

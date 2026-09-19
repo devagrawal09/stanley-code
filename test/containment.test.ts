@@ -4,7 +4,16 @@
  * delegated task agents.
  */
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  readlinkSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { Readable } from "node:stream";
 import { describe, test } from "node:test";
@@ -142,7 +151,7 @@ describe("worker lifecycle", () => {
 });
 
 describe("workflow-directory guard around delegation", () => {
-  test("fingerprints detect added, modified, and removed workflow files", async () => {
+  test("fingerprints detect added, modified, and removed workflow files, and added symlinks", async () => {
     const r = tempRepo({ [`${WORKFLOW_DIRECTORY}/keep.ts`]: "a", [`${WORKFLOW_DIRECTORY}/gone.ts`]: "b" });
     try {
       const before = await workflowDirectoryFingerprint(r.root);
@@ -152,9 +161,16 @@ describe("workflow-directory guard around delegation", () => {
       });
       const { rmSync } = await import("node:fs");
       rmSync(join(r.root, WORKFLOW_DIRECTORY, "gone.ts"));
+      // A symlink is an entry in its own right, whether it points inside or outside the directory.
+      symlinkSync("keep.ts", join(r.root, WORKFLOW_DIRECTORY, "alias.ts"));
+      symlinkSync(join(r.root, "outside"), join(r.root, WORKFLOW_DIRECTORY, "dangling"));
       const after = await workflowDirectoryFingerprint(r.root);
       assert.deepEqual(workflowDirectoryChanges(before, after), {
-        added: [`${WORKFLOW_DIRECTORY}/pkg/index.ts`],
+        added: [
+          `${WORKFLOW_DIRECTORY}/alias.ts`,
+          `${WORKFLOW_DIRECTORY}/dangling`,
+          `${WORKFLOW_DIRECTORY}/pkg/index.ts`,
+        ],
         modified: [`${WORKFLOW_DIRECTORY}/keep.ts`],
         removed: [`${WORKFLOW_DIRECTORY}/gone.ts`],
       });
@@ -164,7 +180,7 @@ describe("workflow-directory guard around delegation", () => {
     }
   });
 
-  test("a delegated agent cannot install a workflow: added files are quarantined, edits elsewhere are kept", async () => {
+  test("a delegated agent cannot install a workflow: added files and symlinks are quarantined, edits elsewhere are kept", async () => {
     const existing =
       'export default async () => ({ id: "existing", instructions: "e", run() { return "e"; } });\n';
     const r = tempRepo({
@@ -178,6 +194,8 @@ describe("workflow-directory guard around delegation", () => {
           join(task.cwd, WORKFLOW_DIRECTORY, "sneaky.ts"),
           'export default async () => ({ id: "sneaky", instructions: "s", run() { return "s"; } });\n',
         );
+        // A symlink into the repository would load as a workflow on the next run if it stayed in place.
+        symlinkSync(join(task.cwd, "src/legit.ts"), join(task.cwd, WORKFLOW_DIRECTORY, "linked.ts"));
         writeFileSync(join(task.cwd, WORKFLOW_DIRECTORY, "existing.ts"), `${existing}// tampered\n`);
         return { text: "deployed" };
       });
@@ -199,21 +217,27 @@ describe("workflow-directory guard around delegation", () => {
       assert.equal(envelope.status, "complete");
       const notChecked: string[] = envelope.output.data.notChecked;
       assert.ok(
-        notChecked.some((n) => n.includes("sneaky.ts") && n.includes("not active")),
+        notChecked.some(
+          (n) => n.includes("sneaky.ts") && n.includes("linked.ts") && n.includes("not active"),
+        ),
         notChecked.join("\n"),
       );
       assert.ok(
         notChecked.some((n) => n.includes("existing.ts") && n.includes("not restored")),
         notChecked.join("\n"),
       );
-      assert.match(stderr, /warning: the agent added 1 file\(s\) under \.stanley\/workflows\//);
+      assert.match(stderr, /warning: the agent added 2 file\(s\) under \.stanley\/workflows\//);
       assert.match(stderr, /warning: the agent changed trusted workflow files/);
 
       assert.ok(!existsSync(join(r.root, WORKFLOW_DIRECTORY, "sneaky.ts")), "not activated");
+      assert.throws(() => lstatSync(join(r.root, WORKFLOW_DIRECTORY, "linked.ts")), "link not activated");
       const quarantine = join(r.root, QUARANTINE_DIRECTORY);
       const [stamp] = readdirSync(quarantine);
       assert.ok(stamp);
       assert.match(readFileSync(join(quarantine, stamp, "sneaky.ts"), "utf8"), /id: "sneaky"/);
+      const quarantinedLink = join(quarantine, stamp, "linked.ts");
+      assert.ok(lstatSync(quarantinedLink).isSymbolicLink(), "moved as a link, not followed");
+      assert.match(readlinkSync(quarantinedLink), /\/src\/legit\.ts$/, "the link target is untouched");
       assert.ok(existsSync(join(r.root, "src/legit.ts")), "legitimate task edits are preserved");
       assert.match(readFileSync(join(r.root, WORKFLOW_DIRECTORY, "existing.ts"), "utf8"), /tampered/);
       assert.match(

@@ -83,8 +83,13 @@ export type JudgeResult =
 export type JudgeFn = (request: JudgeRequest) => Promise<JudgeResult>;
 
 /** What the host has established deterministically about a request before Jev routes it. */
-export type InputShape = "none" | "failure_log" | "review_comments" | "text";
+export const INPUT_SHAPES = ["none", "failure_log", "review_comments", "text"] as const;
+export type InputShape = (typeof INPUT_SHAPES)[number];
 export type DiffPresence = "present" | "absent";
+
+export function isInputShape(value: unknown): value is InputShape {
+  return INPUT_SHAPES.includes(value as InputShape);
+}
 
 export interface RoutingFacts {
   /** Whether the selected scope has a diff, counting safe untracked files the way workflows load them. */

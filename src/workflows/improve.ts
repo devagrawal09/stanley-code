@@ -6,6 +6,7 @@
  */
 import { stableId } from "../core/hash.ts";
 import type { JsonObject } from "../core/types.ts";
+import { type InputShape, isInputShape } from "../core/workflow.ts";
 import type { AgentOutcome } from "./agent.ts";
 
 export const IMPROVEMENT_JOB_SCHEMA = "stanley.improvement-job/v1";
@@ -29,8 +30,8 @@ export interface ImprovementJob {
   readonly id: string;
   /** The redacted request the fallback handled. */
   readonly request: string;
-  /** Shape of any supplied input: none, failure_log, review_comments, or text. */
-  readonly inputShape: string;
+  /** Shape of any supplied input; the router sees the same fact when the candidate is checked. */
+  readonly inputShape: InputShape;
   readonly source: "agent_fallback";
   readonly createdAt: string;
   readonly attempts: number;
@@ -76,7 +77,7 @@ export function improvementJobId(request: string): string {
 
 export function createImprovementJob(
   request: string,
-  inputShape: string,
+  inputShape: InputShape,
   now: () => Date = () => new Date(),
 ): ImprovementJob {
   return {
@@ -98,7 +99,7 @@ export function isImprovementJob(value: unknown): value is ImprovementJob {
     typeof job.id === "string" &&
     /^imp_[0-9a-f]{12}$/.test(job.id) &&
     typeof job.request === "string" &&
-    typeof job.inputShape === "string" &&
+    isInputShape(job.inputShape) &&
     job.source === "agent_fallback" &&
     typeof job.createdAt === "string" &&
     typeof job.attempts === "number"

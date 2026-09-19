@@ -7,6 +7,7 @@ import { createFakeAgent } from "../src/adapters/fake-agent.ts";
 import { fakeChoice, fakeNoul } from "../src/adapters/fake-jev.ts";
 import {
   CANDIDATE_DIRECTORY,
+  type CandidateRoute,
   EXAMPLE_WORKFLOW,
   enqueueImprovement,
   IMPROVEMENT_DIRECTORY,
@@ -24,6 +25,7 @@ import { runCli } from "../src/cli.ts";
 import {
   createImprovementJob,
   IMPROVEMENT_LIMITS,
+  type ImprovementJob,
   improvementInstructions,
   improvementJobId,
 } from "../src/workflows/improve.ts";
@@ -120,6 +122,27 @@ describe("improvement jobs", () => {
       r.cleanup();
     }
   });
+
+  test("concurrent exclusive creates in one process never collide on their temporary files", async () => {
+    const r = tempRepo({ "README.md": "x" });
+    try {
+      for (let round = 0; round < 5; round++) {
+        const job = createImprovementJob(`race ${round}`, "none");
+        const outcomes = await Promise.all(Array.from({ length: 8 }, () => enqueueImprovement(r.root, job)));
+        assert.equal(outcomes.filter((outcome) => outcome === "queued").length, 1, outcomes.join(", "));
+        assert.ok(outcomes.every((outcome) => outcome === "queued" || outcome === "already_queued"));
+      }
+      const pending = readdirSync(join(r.root, IMPROVEMENT_DIRECTORY, "pending"));
+      assert.equal(pending.length, 5);
+      assert.deepEqual(
+        pending.filter((name) => !name.endsWith(".json")),
+        [],
+        "no temporary files are left behind",
+      );
+    } finally {
+      r.cleanup();
+    }
+  });
 });
 
 describe("improvement worker", () => {
@@ -129,16 +152,34 @@ describe("improvement worker", () => {
       const job = createImprovementJob(REQUEST, "none");
       await enqueueImprovement(r.root, job);
       const agent = writer((id) => ({ [`${CANDIDATE_DIRECTORY}/${id}/todo_audit.ts`]: candidateWorkflow() }));
-      const checked: Array<[string, string]> = [];
+      const checked: unknown[] = [];
       const summary = await worker(r.root, agent, {
-        routeCheck: async (candidate: { id: string }, request: string) => {
-          checked.push([candidate.id, request]);
+        routeCheck: async (candidate: CandidateRoute, checkedJob: ImprovementJob) => {
+          checked.push([
+            candidate.id,
+            candidate.routing,
+            candidate.available({ diff: "absent", input: "none" }),
+            checkedJob.request,
+            checkedJob.inputShape,
+          ]);
           return true;
         },
         log: undefined,
       });
       assert.deepEqual(summary, { ran: true, processed: [{ id: job.id, status: "validated" }] });
-      assert.deepEqual(checked, [["todo_audit", REQUEST]]);
+      // The router sees the job and the candidate's routing metadata (control fields excluded), not its code.
+      assert.deepEqual(checked, [
+        [
+          "todo_audit",
+          {
+            instructions: "Use when the user asks to audit or list TODO comments in the repository.",
+            examples: ["Audit the TODO comments"],
+          },
+          true,
+          REQUEST,
+          "none",
+        ],
+      ]);
       assert.equal(agent.calls[0]!.task.kind, "improve");
       assert.equal(agent.calls[0]!.options.timeoutMs, IMPROVEMENT_LIMITS.jobTimeoutMs);
 
@@ -205,7 +246,7 @@ describe("improvement worker", () => {
         {
           request: "duplicate",
           files: (id) => ({ [`${CANDIDATE_DIRECTORY}/${id}/find.ts`]: candidateWorkflow("find") }),
-          expect: /workflow id find is already registered/,
+          expect: /workflow id find is reserved or already registered/,
           check: (record) => assert.equal(record.checks.duplicateId, true),
         },
         {
@@ -319,6 +360,78 @@ describe("improvement worker", () => {
         ["validated"],
       );
       assert.ok(!existsSync(lock));
+    } finally {
+      r.cleanup();
+    }
+  });
+
+  test("the CLI routes a candidate on the job's input shape with its own gate, and refuses router labels", async () => {
+    const r = tempRepo({ "src/a.ts": "export const a = 1;\n" });
+    try {
+      const gated = `export default async () => ({
+  id: "gated_audit",
+  instructions: "Use when the user asks to audit supplied test failures for flaky tests.",
+  available: (facts) => facts.input === "failure_log",
+  async run() { return "audited"; },
+});
+`;
+      const withLog = createImprovementJob("Audit these failures for flaky tests", "failure_log");
+      const withoutLog = createImprovementJob("Audit for flaky tests", "none");
+      const label = createImprovementJob("Claim the router label", "none");
+      for (const job of [withLog, withoutLog, label])
+        assert.equal(await enqueueImprovement(r.root, job), "queued");
+      const files: Record<string, string> = {
+        [withLog.id]: gated,
+        [withoutLog.id]: gated,
+        [label.id]: candidateWorkflow("cannot_tell"),
+      };
+      const agent = writer((id) => ({ [`${CANDIDATE_DIRECTORY}/${id}/candidate.ts`]: files[id]! }));
+      const jev = fake((name, question) => {
+        if (name !== "route" || question.type !== "choice") return undefined;
+        const labels = Object.keys(question.criteria);
+        return fakeChoice(labels, labels.includes("gated_audit") ? "gated_audit" : "cannot_tell", 0.9);
+      });
+      let stdout = "";
+      const code = await runCli(
+        ["--improve-worker", "--json"],
+        {
+          stdout: { write: (t: string) => (stdout += t) },
+          stderr: { write: () => {} },
+          stdin: Readable.from([""]),
+          cwd: r.root,
+          env: {},
+        },
+        { adapter: jev, agent },
+      );
+      assert.equal(code, 0);
+      const processed = JSON.parse(stdout).processed as Array<{ id: string; status: string }>;
+      const statusOf = (job: ImprovementJob) => processed.find((entry) => entry.id === job.id)?.status;
+      assert.equal(statusOf(withLog), "validated");
+      assert.equal(statusOf(withoutLog), "rejected");
+      assert.equal(statusOf(label), "rejected");
+
+      // The router saw each job's own input shape and the candidate's gate verdict on it.
+      const contexts = jev.requests
+        .filter((request) => request.questions.route !== undefined)
+        .map((request) => request.state.context as { input: string; capabilities: Record<string, boolean> })
+        .map((context) => [context.input, context.capabilities.gated_audit]);
+      assert.deepEqual(contexts.sort(), [
+        ["failure_log", true],
+        ["none", false],
+      ]);
+      assert.equal((await readCandidate(r.root, withLog.id))?.checks.routing, "selected");
+      const ungated = await readCandidate(r.root, withoutLog.id);
+      assert.equal(ungated?.checks.routing, "not_selected");
+      assert.match(ungated?.reasons.join("\n") ?? "", /router did not select/);
+
+      // A candidate claiming the router's own label is rejected before it is ever offered to the router.
+      const reserved = await readCandidate(r.root, label.id);
+      assert.equal(reserved?.checks.duplicateId, true);
+      assert.equal(reserved?.checks.routing, "skipped");
+      assert.match(
+        reserved?.reasons.join("\n") ?? "",
+        /workflow id cannot_tell is reserved or already registered/,
+      );
     } finally {
       r.cleanup();
     }

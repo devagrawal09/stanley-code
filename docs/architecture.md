@@ -44,7 +44,8 @@ Using `check` as the example:
    validated improvement candidates await review, one stderr line says so; if improvement jobs are pending and
    no worker is alive, a worker is started (see below).
 3. **routing** (`cli/router.ts`) receives the redacted request plus deterministic facts: diff presence
-   (`workflows/common.ts#diffPresence`, which counts safe untracked files exactly as workflows load them),
+   (`workflows/common.ts#diffPresence`, which counts safe untracked files exactly as workflows load them;
+   `cli/facts.ts` loads it once per routing decision and lets the fallback explanation reuse it),
    input shape, and, from the registry, every workflow's JSON routing metadata and its
    `available` verdict on those facts. One validated choice selects a candidate or `cannot_tell`. Fixed
    confidence thresholds (`ROUTING_POLICY`) and the capability verdicts turn uncertain or unavailable choices
@@ -92,8 +93,9 @@ Nested `prompt()` calls never delegate; an agent is not a composable sub-workflo
 with `STANLEY_NESTED=1`, so an agent that runs `stanley` itself gets a Stanley that cannot delegate or queue.
 
 The workflow directory is guarded around every delegation: `cli.ts` fingerprints `.stanley/workflows/` before
-and after the agent run. Files the agent added are moved to `.stanley/quarantine/<stamp>/` (never deleted) and
-files it modified or removed are reported; both appear as stderr warnings and in the result's `notChecked`. A
+and after the agent run. Files and symlinks the agent added are moved to `.stanley/quarantine/<stamp>/` (never
+deleted; a symlink is moved as a link, not followed) and files it modified or removed are reported; both appear
+as stderr warnings and in the result's `notChecked`. A
 task agent can therefore edit the repository but cannot silently activate a workflow; activation stays with
 `--promote-candidate`.
 
@@ -129,11 +131,13 @@ ids, the active repository workflows as examples, and the shipped reference work
 exactly one file under `.stanley/candidates/<job>/` or nothing. It then validates:
 
 1. the candidate directory loads through `loadWorkflows()` with exactly one valid workflow and no quarantine;
-2. the id is not a built-in or active repository workflow id;
+2. the id is not a built-in or active repository workflow id, nor a router label such as `cannot_tell`;
 3. nothing outside the candidate directory changed (new status entries or a changed worktree diff), checked
    after the agent run *and again after the candidate module was imported and its factory awaited*, because
    loading executes agent-authored top-level code; such changes are reported, never reverted;
-4. optionally, the router selects the candidate for the original request (`routeCheck`).
+4. optionally, the router selects the candidate for the original request (`routeCheck`), routed on the job's
+   request and recorded input shape, beside every registered workflow, with the candidate's own `available`
+   gate applied to those facts, exactly as it would be routed once promoted.
 
 The record `candidate.json` is `validated` or `rejected` with reasons. A job whose agent timed out or crashed
 without writing outside its directory is retried once; every other outcome is final. A candidate's `run` never
@@ -165,6 +169,12 @@ is the task and the semantic instructions, the input is the one piece of externa
   with request validation (`core/workflow.ts`), redaction, the shared budget, answer validation
   (`core/validation.ts#readAnswers`), and a cap of 64 calls per run and 8 questions per call. It returns
   `{ ok: true, answers }` or `{ ok: false, reason }` and never throws.
+- `log` is the structured workflow log. `warn` and `error` records from initialization and `run` are written
+  to stderr as `stanley: workflow <source> <level>: <message>`, redacted and bounded like host warnings;
+  `debug` and `info` records are discarded.
+
+A repository whose workflows collide on an id, with each other or with a built-in, or claim a router label is
+reported as an input error (exit 65), not an internal failure.
 
 ## Why core is thin
 

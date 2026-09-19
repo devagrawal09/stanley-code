@@ -15,6 +15,7 @@ export { createFakeAdapter, fakeChoice, fakeNoul, fakeScore } from "./adapters/f
 // adapters: durable self-improvement queue, worker, and candidate staging
 export {
   CANDIDATE_DIRECTORY,
+  type CandidateRoute,
   discardCandidate,
   type EnqueueOutcome,
   EXAMPLE_WORKFLOW,
@@ -168,7 +169,9 @@ export {
   createWorkflowLog,
   type DiffPresence,
   FORBIDDEN_FIELDS,
+  INPUT_SHAPES,
   type InputShape,
+  isInputShape,
   isPromptResult,
   isWorkflowValue,
   JUDGE_LIMITS,

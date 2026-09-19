@@ -14,10 +14,12 @@
  * automatically: `promoteCandidate` moves a validated candidate into `.stanley/workflows/` on request.
  */
 import { spawn as nodeSpawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { link, mkdir, readdir, readFile, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { basename, join, relative } from "node:path";
 import { hashValue } from "../core/hash.ts";
 import type { JsonObject } from "../core/types.ts";
+import { type RoutingFacts, workflowRoutingMetadata } from "../core/workflow.ts";
 import type { AgentRunResult, CodingAgentPort } from "../workflows/agent.ts";
 import {
   CANDIDATE_SCHEMA,
@@ -134,9 +136,17 @@ async function exists(path: string): Promise<boolean> {
   }
 }
 
+/**
+ * A temporary path unique to this write. The pid alone is not enough: two workers in one process (tests, or an
+ * embedder) writing the same target in the same millisecond would share a name and one would lose its file.
+ */
+function temporaryPath(path: string): string {
+  return `${path}.tmp-${process.pid}-${randomBytes(6).toString("hex")}`;
+}
+
 /** Create a file exclusively and atomically: a temporary file is hard-linked into place, never overwritten. */
 async function createExclusive(path: string, content: string): Promise<boolean> {
-  const temporary = `${path}.tmp-${process.pid}-${Date.now()}`;
+  const temporary = temporaryPath(path);
   await writeFile(temporary, content, { mode: 0o600 });
   try {
     await link(temporary, path);
@@ -150,7 +160,7 @@ async function createExclusive(path: string, content: string): Promise<boolean> 
 }
 
 async function writeJson(path: string, value: unknown): Promise<void> {
-  const temporary = `${path}.tmp-${process.pid}`;
+  const temporary = temporaryPath(path);
   await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
   await rename(temporary, path);
 }
@@ -252,7 +262,8 @@ export const QUARANTINE_DIRECTORY = `${STATE_DIRECTORY}/quarantine`;
 
 /**
  * Move workflow files out of `.stanley/workflows/` into a timestamped quarantine directory, preserving their
- * relative paths. Nothing is deleted or rewritten; the caller reports where the files went.
+ * relative paths. A symlink is moved as a link, never followed. Nothing is deleted or rewritten; the caller
+ * reports where the files went.
  */
 export async function quarantineWorkflowFiles(
   root: string,
@@ -293,16 +304,24 @@ export function spawnImprovementWorker(options: {
   return child.pid;
 }
 
+/** A validated candidate as the router must see it: its id, its JSON routing metadata, and its own gate. */
+export interface CandidateRoute {
+  readonly id: string;
+  readonly routing: JsonObject;
+  /** The candidate's `available` verdict on the routing facts; always eligible when it declares none. */
+  readonly available: (facts: RoutingFacts) => boolean;
+}
+
 export interface WorkerOptions {
   readonly root: string;
   readonly agent: CodingAgentPort;
-  /** Ids the candidate must not claim: built-ins plus active repository workflows. */
+  /** Ids the candidate must not claim: built-ins, active repository workflows, and the router's own labels. */
   readonly reservedIds: readonly string[];
-  /** Asks the router whether it would select the candidate for the job's request; null when not checkable. */
-  readonly routeCheck?: (
-    candidate: { id: string; routing: JsonObject },
-    request: string,
-  ) => Promise<boolean | null>;
+  /**
+   * Asks the router whether it would select the candidate for the job, routed on the job's request and input
+   * shape with the candidate's own eligibility gate applied; null when not checkable.
+   */
+  readonly routeCheck?: (candidate: CandidateRoute, job: ImprovementJob) => Promise<boolean | null>;
   readonly signal?: AbortSignal;
   readonly now?: () => Date;
   readonly jobTimeoutMs?: number;
@@ -530,14 +549,16 @@ async function validateCandidate(
       workflowId = candidate.workflow.id;
       source = candidate.source.path;
       duplicateId = options.reservedIds.includes(candidate.workflow.id);
-      if (duplicateId) reasons.push(`workflow id ${candidate.workflow.id} is already registered`);
+      if (duplicateId) reasons.push(`workflow id ${candidate.workflow.id} is reserved or already registered`);
       if (options.routeCheck && reasons.length === 0) {
-        const metadata = Object.fromEntries(
-          Object.entries(candidate.workflow).filter(([field]) => !["id", "run", "cleanup"].includes(field)),
-        ) as JsonObject;
+        const { workflow } = candidate;
         const selected = await options.routeCheck(
-          { id: candidate.workflow.id, routing: metadata },
-          job.request,
+          {
+            id: workflow.id,
+            routing: workflowRoutingMetadata(workflow),
+            available: (facts) => workflow.available?.(facts) ?? true,
+          },
+          job,
         );
         routing = selected === null ? "skipped" : selected ? "selected" : "not_selected";
         if (selected === false)

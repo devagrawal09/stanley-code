@@ -5,6 +5,7 @@ import { Readable } from "node:stream";
 import { describe, test } from "node:test";
 import { fakeChoice, fakeNoul, fakeScore } from "../src/adapters/fake-jev.ts";
 import { BUILTINS, type BuiltinName } from "../src/cli/builtins.ts";
+import { routingFactsSource } from "../src/cli/facts.ts";
 import { CANNOT_TELL } from "../src/cli/router.ts";
 import { runCli } from "../src/cli.ts";
 import type { JevPort as JevAdapter } from "../src/core/types.ts";
@@ -284,6 +285,73 @@ describe("cli", () => {
       assert.match(blockedChild.output.text, /cannot implement or fix code/i);
     } finally {
       r.cleanup();
+    }
+  });
+
+  test("forwards repository workflow warn and error records to stderr and drops lower levels", async () => {
+    const r = tempRepo({
+      "src/a.ts": "export const a = 1;\n",
+      ".stanley/workflows/noisy.ts": `
+        type Log = { debug(m: string): void; info(m: string): void; warn(m: string, d?: unknown): void; error(m: string): void };
+        export default async ({ log }: { log: Log }) => {
+          log.info("initialized");
+          log.warn("cache missing", { path: "tmp/cache" });
+          return {
+            id: "noisy",
+            instructions: "Use to list the repository notes.",
+            async run({ log }: { log: Log }) {
+              log.debug("scanning");
+              log.error("index unreadable");
+              return "listed";
+            },
+          };
+        };
+      `,
+    });
+    try {
+      const adapter = fake((name, question) =>
+        name === "route" && question.type === "choice"
+          ? fakeChoice(Object.keys(question.criteria), "noisy", 0.9)
+          : undefined,
+      );
+      const result = await cli(r.root, ["List the notes", "--json", "--no-persist"], { adapter });
+      assert.equal(result.code, 0, result.stderr);
+      assert.equal(JSON.parse(result.stdout).output, "listed");
+      assert.deepEqual(result.stderr.split("\n").filter(Boolean), [
+        'stanley: workflow .stanley/workflows/noisy.ts warn: cache missing {"path":"tmp/cache"}',
+        "stanley: workflow .stanley/workflows/noisy.ts error: index unreadable",
+      ]);
+    } finally {
+      r.cleanup();
+    }
+  });
+
+  test("repository workflow id collisions and reserved ids are input errors, not internal failures", async () => {
+    const duplicate = tempRepo({
+      "src/a.ts": "export const a = 1;\n",
+      ".stanley/workflows/find.ts": 'export default async () => ({ id: "find", run() { return "x"; } });\n',
+    });
+    const reserved = tempRepo({
+      "src/a.ts": "export const a = 1;\n",
+      ".stanley/workflows/label.ts":
+        'export default async () => ({ id: "cannot_tell", run() { return "x"; } });\n',
+    });
+    try {
+      const collided = await cli(duplicate.root, ["Find the relevant code", "--json"], {
+        adapter: routed("find"),
+      });
+      assert.equal(collided.code, 65);
+      assert.equal(JSON.parse(collided.stdout).error.kind, "input");
+      assert.match(
+        collided.stderr,
+        /^stanley: input error: duplicate workflow id: find \(registered by builtin and \.stanley\/workflows\/find\.ts\)$/m,
+      );
+      const claimed = await cli(reserved.root, ["Find the relevant code"], { adapter: routed("find") });
+      assert.equal(claimed.code, 65);
+      assert.match(claimed.stderr, /^stanley: input error: reserved workflow id: cannot_tell/m);
+    } finally {
+      duplicate.cleanup();
+      reserved.cleanup();
     }
   });
 
@@ -650,5 +718,27 @@ describe("cli", () => {
     } finally {
       r.cleanup();
     }
+  });
+});
+
+describe("routing facts", () => {
+  test("the diff is loaded once per routing decision and reused by the explanation that follows it", async () => {
+    let loads = 0;
+    const source = routingFactsSource(async () => (++loads % 2 === 1 ? "absent" : "present"));
+    assert.deepEqual(await source.forDecision("none"), { diff: "absent", input: "none" });
+    assert.deepEqual(await source.forExplanation("text"), { diff: "absent", input: "text" });
+    assert.equal(loads, 1, "the fallback explanation reuses the decision's diff");
+    // A later decision (a nested prompt after the workflow may have changed files) loads the diff again.
+    assert.deepEqual(await source.forDecision("failure_log"), { diff: "present", input: "failure_log" });
+    assert.deepEqual(await source.forExplanation("none"), { diff: "present", input: "none" });
+    assert.equal(loads, 2);
+    // An explanation with no preceding decision loads the diff exactly once.
+    const fresh = routingFactsSource(async () => {
+      loads++;
+      return "present";
+    });
+    assert.equal((await fresh.forExplanation("none")).diff, "present");
+    assert.equal((await fresh.forExplanation("text")).diff, "present");
+    assert.equal(loads, 3);
   });
 });

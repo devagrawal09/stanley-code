@@ -38,6 +38,7 @@ import {
   workflowDirectoryFingerprint,
 } from "./adapters/workflows.ts";
 import { BUILTINS, builtinWorkflows, inputText, isBuiltinName, runBuiltin } from "./cli/builtins.ts";
+import { routingFactsSource } from "./cli/facts.ts";
 import { createWorkflowJudge } from "./cli/judge.ts";
 import { EXIT, UsageError } from "./cli/output.ts";
 import {
@@ -46,7 +47,13 @@ import {
   renderPromptResult,
   unsupportedPromptResult,
 } from "./cli/prompt-result.ts";
-import { createRegistry, registerRepositoryWorkflows } from "./cli/registry.ts";
+import {
+  createRegistry,
+  DuplicateWorkflowIdError,
+  RESERVED_WORKFLOW_IDS,
+  ReservedWorkflowIdError,
+  registerRepositoryWorkflows,
+} from "./cli/registry.ts";
 import { type RoutingDecision, RoutingError, routeIntent } from "./cli/router.ts";
 import { type FallbackReason, WorkflowRuntime } from "./cli/runtime.ts";
 import { Budget, type BudgetLimits } from "./core/budget.ts";
@@ -56,7 +63,7 @@ import {
   type InputShape,
   isWorkflowValue,
   type PromptResult,
-  type RoutingFacts,
+  type WorkflowLogRecord,
   type WorkflowValue,
 } from "./core/workflow.ts";
 import {
@@ -277,6 +284,13 @@ export async function runCli(argv: string[], io: CliIO, injected: CliInjections 
   const warnWorkflow = (message: string) => {
     io.stderr.write(`${safeMessage(message)}\n`);
   };
+  // Trusted workflows' own warn and error records reach the same sink as host warnings; lower levels are
+  // discarded. The record is redacted and bounded like every other warning.
+  const logWorkflow = (record: WorkflowLogRecord) => {
+    if (record.level !== "warn" && record.level !== "error") return;
+    const data = record.data === undefined ? "" : ` ${JSON.stringify(record.data)}`;
+    warnWorkflow(`stanley: workflow ${record.source} ${record.level}: ${record.message}${data}`);
+  };
   const nested = Boolean(io.env[NESTED_ENV]?.trim());
   try {
     if (argv.length === 0) {
@@ -373,10 +387,7 @@ export async function runCli(argv: string[], io: CliIO, injected: CliInjections 
     }
     const topInput = workflowInput(supplied?.text ?? null);
 
-    const facts = async (input: InputShape): Promise<RoutingFacts> => ({
-      diff: await diffPresence(dependencies, selection),
-      input,
-    });
+    const facts = routingFactsSource(() => diffPresence(dependencies, selection));
     const registry = createRegistry(
       builtinWorkflows({
         run: options,
@@ -385,12 +396,15 @@ export async function runCli(argv: string[], io: CliIO, injected: CliInjections 
           supplied && topInput !== undefined ? { text: inputText(topInput)!, source: supplied.source } : null,
       }),
     );
-    loadedWorkflows = (await registerRepositoryWorkflows(registry, { root, signal, warn: warnWorkflow }))
-      .loaded;
+    loadedWorkflows = (
+      await registerRepositoryWorkflows(registry, { root, signal, warn: warnWorkflow, log: logWorkflow })
+    ).loaded;
+    // A candidate may claim neither a registered id nor a label the router itself uses.
+    const reservedIds = [...registry.ids(), ...RESERVED_WORKFLOW_IDS];
 
     if (workerMode || promotion !== null) {
       if (promotion !== null) {
-        const promoted = await promoteCandidate(root, promotion, registry.ids());
+        const promoted = await promoteCandidate(root, promotion, reservedIds);
         const summary = {
           schema: "stanley.promotion/v1",
           candidate: promotion,
@@ -408,20 +422,25 @@ export async function runCli(argv: string[], io: CliIO, injected: CliInjections 
         io.stderr.write(`stanley: improvement worker not started: agent ${availability.reason}\n`);
         return EXIT.usage;
       }
-      const workerFacts = await facts("none");
       const summary = await runImprovementWorker({
         root,
         agent,
-        reservedIds: registry.ids(),
+        reservedIds,
         signal,
-        routeCheck: async (candidate, candidateRequest) => {
+        // The candidate is routed exactly as it would be once promoted: on the job's request and input shape,
+        // beside every registered workflow, with its own eligibility gate applied.
+        routeCheck: async (candidate, job) => {
+          const candidateFacts = await facts.forDecision(job.inputShape);
           try {
             const decision = await routeIntent(
               {
-                request: candidateRequest,
-                ...workerFacts,
-                capabilities: { ...registry.capabilities(workerFacts), [candidate.id]: true },
-                candidates: [...registry.candidates(), candidate],
+                request: job.request,
+                ...candidateFacts,
+                capabilities: {
+                  ...registry.capabilities(candidateFacts),
+                  [candidate.id]: candidate.available(candidateFacts),
+                },
+                candidates: [...registry.candidates(), { id: candidate.id, routing: candidate.routing }],
               },
               dependencies,
               model ?? DEFAULT_MODEL,
@@ -458,7 +477,7 @@ export async function runCli(argv: string[], io: CliIO, injected: CliInjections 
       childInput: WorkflowValue | undefined,
       excluded: ReadonlySet<string>,
     ): Promise<{ selected: string | null; reason: RouteReason }> => {
-      const childFacts = await facts(classifyInput(inputText(childInput), dependencies));
+      const childFacts = await facts.forDecision(classifyInput(inputText(childInput), dependencies));
       const candidates = registry.candidates().filter((candidate) => !excluded.has(candidate.id));
       if (candidates.length === 0) return { selected: null, reason: "no_candidates" };
       try {
@@ -593,7 +612,7 @@ export async function runCli(argv: string[], io: CliIO, injected: CliInjections 
         calls: "The request was stopped at the child prompt call limit.",
       };
       if (reason !== "unroutable") return unsupportedPromptResult(messages[reason], detail);
-      const fallbackFacts = await facts(classifyInput(inputText(fallbackInput), dependencies));
+      const fallbackFacts = await facts.forExplanation(classifyInput(inputText(fallbackInput), dependencies));
       return unsupportedPromptResult(
         `No installed workflow can confidently handle the complete request. ${clarification(
           fallbackFacts.diff,
@@ -627,16 +646,21 @@ export async function runCli(argv: string[], io: CliIO, injected: CliInjections 
         (await decide(childRequest, childInput, excluded)).selected,
       fallback,
       judge: judgeFor,
+      log: logWorkflow,
     });
     return writePromptResult(await runtime.run(selectedWorkflow.id, request, topInput), Boolean(v.json), io);
   } catch (error) {
     const usage =
       error instanceof UsageError || (error as { code?: string }).code?.startsWith("ERR_PARSE_ARGS");
+    // A repository whose workflows collide with each other, a built-in, or a router label is the user's input
+    // to fix, not a Stanley failure.
     const input =
       error instanceof MissingCredentialError ||
       error instanceof InputError ||
       error instanceof GitError ||
-      error instanceof PromotionError;
+      error instanceof PromotionError ||
+      error instanceof DuplicateWorkflowIdError ||
+      error instanceof ReservedWorkflowIdError;
     const code = usage ? EXIT.usage : input ? EXIT.input : EXIT.internal;
     const kind = usage ? "usage" : input ? "input" : "internal";
     const message = safeMessage(error);
