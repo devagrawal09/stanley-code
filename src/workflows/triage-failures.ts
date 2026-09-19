@@ -30,10 +30,9 @@ export interface FailuresSectionInput {
 }
 
 export const TRIAGE_FAILURES_POLICY = {
-  version: "triage-failures-policy@2",
+  version: "triage-failures-policy@3",
   defaultMaxItems: 40,
   decisive: 0.6,
-  causedConflict: 0.6,
   unrelatedConflict: 0.7,
   nondeterminism: 0.7,
   probeMissingEvidence: 0.5,
@@ -246,7 +245,7 @@ export function failuresSection(
     limits.push("no failure anchors were recognized; the log format may be unsupported");
   if (parsed.blocks.length > maxFailures) {
     limits.push(
-      `only the first ${maxFailures} of ${parsed.blocks.length} failure blocks are judged (--max-items)`,
+      `only the first ${maxFailures} of ${parsed.blocks.length} failure blocks are judged (policy item limit)`,
     );
   }
   const overlong = parsed.blocks.filter((block) => block.omittedLines > 0).length;
@@ -287,9 +286,7 @@ export function failuresSection(
       relation: diff
         ? { label: "unjudged", determinedBy: "code", distribution: null }
         : { label: "unknown_no_diff_context", determinedBy: "code", distribution: null },
-      failureKind: block.compileError
-        ? { label: "compile_or_type_error", determinedBy: "code", distribution: null }
-        : { label: "unjudged", determinedBy: "code", distribution: null },
+      failureKind: { label: "unjudged", determinedBy: "code", distribution: null },
       nondeterminismSignature: null,
       missingEvidence: null,
       wouldSettle: ["rerun the failing test to check repeatability", "run the same test on the base commit"],
@@ -299,12 +296,14 @@ export function failuresSection(
     };
     results.push(result);
     if (!firstByFingerprint.has(block.fingerprint)) firstByFingerprint.set(block.fingerprint, block.id);
+    // Pattern matches on the log text are observations for the reader and for Jev (they sit in every frame's
+    // `observed` state); they never decide the failure kind or its relation to the diff.
     if (block.compileError) {
       findings.push({
-        flag: "compile_error",
+        flag: "compile_error_signature",
         id: block.id,
         source: "deterministic",
-        severity: "warn",
+        severity: "info",
         lines: result.lines,
         detail: { log: input.source },
       });
@@ -391,34 +390,26 @@ export function failuresSection(
         label: answers.missing.choice,
         distribution: roundedDistribution(answers.missing.probabilities),
       };
-      if (!block.compileError) {
-        result.failureKind = {
-          label: decisiveLabel(answers.kind, TRIAGE_FAILURES_POLICY.decisive) ?? "uncertain",
-          determinedBy: "jev",
-          distribution: roundedDistribution(answers.kind.probabilities),
-        };
-      }
+      result.failureKind = {
+        label: decisiveLabel(answers.kind, TRIAGE_FAILURES_POLICY.decisive) ?? "uncertain",
+        determinedBy: "jev",
+        distribution: roundedDistribution(answers.kind.probabilities),
+      };
       if (answers.relation) {
-        const caused = answers.relation.probabilities.caused_by_diff;
         const unrelated = answers.relation.probabilities.unrelated_to_diff;
         const distribution = roundedDistribution(answers.relation.probabilities);
-        let conflict: string | null = null;
-        if (block.envSignature && caused >= TRIAGE_FAILURES_POLICY.causedConflict) {
-          conflict = `conflict: environment signature (${block.envSignature}) vs caused_by_diff`;
-        } else if (
+        // The one structural cross-check: a stack frame in a changed file contradicts "unrelated". Regex
+        // signatures (environment, compile, timeout) never park or override Jev; they are evidence only.
+        if (
           result.observed.stackTouchesChangedFile &&
           unrelated >= TRIAGE_FAILURES_POLICY.unrelatedConflict
         ) {
-          conflict = "conflict: stack touches a changed file vs unrelated_to_diff";
-        }
-        if (conflict) {
+          const conflict = "conflict: stack touches a changed file vs unrelated_to_diff";
           result.relation = { label: "conflict", determinedBy: "code", distribution };
           result.disposition = "parked";
           run.setDisposition(block.id, "parked");
           parked.push({ id: block.id, reason: conflict });
           await run.decision(block.id, "hard_conflict", conflict, TRIAGE_FAILURES_POLICY.version);
-        } else if (block.envSignature) {
-          result.relation = { label: "environment_or_infrastructure", determinedBy: "code", distribution };
         } else {
           result.relation = {
             label: decisiveLabel(answers.relation, TRIAGE_FAILURES_POLICY.decisive) ?? "uncertain",

@@ -554,7 +554,7 @@ async function analyzeDiff<K extends DiffAnalysisKind>(
   }
   if (eligible.length > maxHunks) {
     limits.push(
-      `only ${maxHunks} highest-priority hunks of ${eligible.length} eligible hunks were judged (--max-hunks)`,
+      `only ${maxHunks} highest-priority hunks of ${eligible.length} eligible hunks were judged (policy hunk limit)`,
     );
   }
 

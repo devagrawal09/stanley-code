@@ -82,9 +82,10 @@ describe("triage: failures", () => {
       assert.match(stateText(probeRequest), /14\| +expect\(cart\.total/);
 
       assert.equal(net!.observed.envSignature, "network");
-      assert.equal(net!.relation.label, "conflict");
-      assert.equal(net!.disposition, "parked");
-      assert.ok(packet.parked[0]!.reason.includes("environment signature"));
+      assert.equal(net!.relation.label, "caused_by_diff", "the network signature is evidence, not a verdict");
+      assert.equal(net!.relation.determinedBy, "jev");
+      assert.equal(net!.disposition, "judged");
+      assert.deepEqual(packet.parked, []);
       assert.ok(packet.findings.some((finding) => finding.flag === "failure_likely_caused_by_diff"));
       assert.ok(
         packet.findings.some(
@@ -99,10 +100,12 @@ describe("triage: failures", () => {
     }
   });
 
-  test("without diff context no relation is asked; duplicates and compile errors are deterministic", async () => {
+  test("without diff context no relation is asked; duplicates are deterministic, kinds are judged", async () => {
     const repo = setup();
     try {
-      const adapter = fake();
+      const adapter = fake((name) =>
+        name === "failure_kind" ? fakeChoice(KINDS, "compile_or_type_error", 0.9) : undefined,
+      );
       const log = [
         "src/cart.ts(2,3): error TS2322: Type 'string' is not assignable to type 'number'.",
         ...Array.from({ length: 40 }, () => "info: building"),
@@ -115,12 +118,67 @@ describe("triage: failures", () => {
       const results = ofKind(packet, "failures");
       assert.equal(results.length, 2);
       assert.equal(results[0]!.relation.label, "unknown_no_diff_context");
+      assert.equal(results[0]!.observed.compileError, true);
       assert.equal(results[0]!.failureKind.label, "compile_or_type_error");
-      assert.equal(results[0]!.failureKind.determinedBy, "code");
+      assert.equal(results[0]!.failureKind.determinedBy, "jev");
       assert.equal(results[1]!.duplicateOf, results[0]!.id);
+      assert.equal(results[1]!.disposition, "deterministic");
       assert.equal(adapter.requests.length, 1);
       assert.ok(!("relation_to_diff" in adapter.requests[0]!.questions));
       assert.ok(packet.notChecked.includes("relation to code changes (no diff context)"));
+    } finally {
+      repo.cleanup();
+    }
+  });
+
+  test("regex hints are observed evidence and never override Jev's kind or relation", async () => {
+    const repo = setup();
+    try {
+      // The log matches the compile-error and network patterns, but Jev reads it as a runtime exception that
+      // the diff caused (say, a changed import that now throws at load time).
+      const log = [
+        "FAIL src/cart.test.ts",
+        "  ● applies discount",
+        "    error TS2322: reported by a stale wrapper; the real failure follows",
+        "    TypeError: getaddrinfo ENOTFOUND is not a function",
+        "      at Object.<anonymous> (src/cart.test.ts:14:5)",
+      ].join("\n");
+      const adapter = fake((name) => {
+        if (name === "relation_to_diff") return fakeChoice(RELATIONS, "caused_by_diff", 0.85);
+        if (name === "failure_kind") return fakeChoice(KINDS, "runtime_exception", 0.85);
+        if (name === "missing_evidence") return fakeChoice(MISSING, "none", 0.9);
+        return undefined;
+      });
+      const packet = await triage(
+        { kind: "failures", text: log, source: "ci.txt" },
+        options(repo.root, adapter),
+      );
+      const [result] = ofKind(packet, "failures");
+      assert.deepEqual(
+        { compileError: result!.observed.compileError, envSignature: result!.observed.envSignature },
+        { compileError: true, envSignature: "network" },
+        "the hints stay visible as observations",
+      );
+      assert.deepEqual(
+        adapter.requests[0]!.state.observed,
+        result!.observed,
+        "and Jev sees them as evidence",
+      );
+      assert.equal(result!.failureKind.label, "runtime_exception");
+      assert.equal(result!.failureKind.determinedBy, "jev");
+      assert.equal(result!.relation.label, "caused_by_diff");
+      assert.equal(result!.relation.determinedBy, "jev");
+      assert.equal(result!.disposition, "judged");
+      assert.deepEqual(packet.parked, []);
+      const flags = packet.findings.map((finding) => [finding.flag, finding.severity, finding.source]);
+      assert.ok(
+        flags.some(
+          ([flag, severity, source]) =>
+            flag === "compile_error_signature" && severity === "info" && source === "deterministic",
+        ),
+      );
+      assert.ok(flags.some(([flag, severity]) => flag === "environment_signature" && severity === "info"));
+      assert.ok(flags.some(([flag]) => flag === "failure_likely_caused_by_diff"));
     } finally {
       repo.cleanup();
     }
@@ -170,7 +228,7 @@ describe("triage: failures", () => {
         options(repo.root, fake()),
       );
       assert.equal(pytest.coverage.complete, false);
-      assert.ok(pytest.limits.some((limit) => limit.includes("--max-items")));
+      assert.ok(pytest.limits.some((limit) => limit.includes("policy item limit")));
     } finally {
       repo.cleanup();
     }

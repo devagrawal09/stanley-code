@@ -6,7 +6,7 @@ import { matchesAnyGlob } from "./classify.ts";
 import { type DiffEvidence, hunkEvidence, hunkRef, type Section, unjudgedOrFailed } from "./common.ts";
 import { InputError } from "./errors.ts";
 import type { Hunk } from "./evidence.ts";
-import { ladderForHunk, lineRange } from "./hunks.ts";
+import { lineRange } from "./hunks.ts";
 import { EVIDENCE_POLICY, round, roundedDistribution } from "./policy.ts";
 import { buildFrame, type Run } from "./run.ts";
 import type { Finding, Parked } from "./types.ts";
@@ -209,7 +209,7 @@ export function rulesSection(
   let pairCount = 0;
   let skippedHunks = 0;
   for (const hunk of diff.hunks) {
-    if (hunk.kind === "lockfile" || hunk.kind === "generated" || ladderForHunk(hunk).formattingOnly) {
+    if (hunk.kind === "lockfile" || hunk.kind === "generated") {
       skippedHunks++;
       continue;
     }
@@ -243,7 +243,7 @@ export function rulesSection(
     }
   }
   if (results.length > maxPairs)
-    limits.push(`only ${maxPairs} of ${results.length} rule-hunk pairs were judged (--max-pairs)`);
+    limits.push(`only ${maxPairs} of ${results.length} rule-hunk pairs were judged (policy pair limit)`);
   return { candidates: { rules, pairs: results.map((result) => result.id) }, judge };
 
   async function judge() {
@@ -323,7 +323,7 @@ export function rulesSection(
             ]
           : []),
         ...(skippedHunks > 0
-          ? [`rules were not applied to ${skippedHunks} lockfile, generated, or formatting-only hunk(s)`]
+          ? [`rules were not applied to ${skippedHunks} lockfile or generated hunk(s)`]
           : []),
         "code outside the diff",
       ],

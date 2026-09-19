@@ -287,7 +287,7 @@ export function taskSection(run: Run, diff: DiffEvidence, input: TaskSectionInpu
   if (diff.hunks.length > 300) limits.push(`diff manifest lists the first 300 of ${diff.hunks.length} hunks`);
   if (diff.hunks.length > maxHunks) {
     limits.push(
-      `only the first ${maxHunks} of ${diff.hunks.length} hunks are eligible for Jev judgment (--max-hunks)`,
+      `only the first ${maxHunks} of ${diff.hunks.length} hunks are eligible for Jev judgment (policy hunk limit)`,
     );
   }
 
@@ -317,8 +317,10 @@ export function taskSection(run: Run, diff: DiffEvidence, input: TaskSectionInpu
       error: null,
     };
     results.set(hunk.id, result);
+    // Every exact signal is reported, including formatting_only: it is an observation Jev also sees in the frame
+    // state, never a reason to skip judgment, because whitespace can change behavior (indentation, templates,
+    // string literals).
     for (const flag of ladder.flags) {
-      if (flag === "formatting_only") continue;
       const warn =
         flag === "skip_marker_added" || flag === "assertions_removed" || flag === "test_file_deleted";
       findings.push({
@@ -330,7 +332,7 @@ export function taskSection(run: Run, diff: DiffEvidence, input: TaskSectionInpu
         lines: result.lines,
       });
     }
-    if (ladder.formattingOnly || hunk.kind === "lockfile" || hunk.kind === "generated") {
+    if (hunk.kind === "lockfile" || hunk.kind === "generated") {
       result.disposition = "deterministic";
       run.setDisposition(hunk.id, "deterministic");
       continue;

@@ -94,13 +94,12 @@ describe("check: task section", () => {
 
       const sentPaths = adapter.requests.map((request) => pathOf(request.state)).filter(Boolean);
       assert.ok(!sentPaths.includes("package-lock.json"), "lockfile hunks are deterministic only");
-      assert.ok(!sentPaths.includes("src/style.ts"), "formatting-only hunks are deterministic only");
-      assert.equal(
-        section(packet, "task").find((result) => result.path === "src/style.ts")!.disposition,
-        "deterministic",
-      );
-      assert.equal(packet.coverage.deterministic, 2);
-      assert.equal(packet.coverage.judged, 4);
+      assert.ok(sentPaths.includes("src/style.ts"), "formatting-looking hunks are still judged");
+      const style = section(packet, "task").find((result) => result.path === "src/style.ts")!;
+      assert.equal(style.disposition, "judged");
+      assert.deepEqual(style.deterministicFlags, ["formatting_only"], "the observation is kept");
+      assert.equal(packet.coverage.deterministic, 1);
+      assert.equal(packet.coverage.judged, 5);
 
       const intent = adapter.requests.find(
         (request) => pathOf(request.state) === "src/cart.ts" && "diffManifest" in request.state,
@@ -114,6 +113,45 @@ describe("check: task section", () => {
         workedExamples: unknown[];
       };
       assert.equal(instructions.workedExamples.length, 6);
+    } finally {
+      repo.cleanup();
+    }
+  });
+
+  test("whitespace-only hunks reach Jev, so indentation that changes behavior can be flagged", async () => {
+    // Python: moving `return total` out of the loop by dedenting changes behavior but squashes to the same text.
+    const repo = tempRepo({
+      "src/sum.py":
+        "def sum(items):\n    total = 0\n    for item in items:\n        total += item\n        return total\n",
+    });
+    try {
+      repo.write({
+        "src/sum.py":
+          "def sum(items):\n    total = 0\n    for item in items:\n        total += item\n    return total\n",
+      });
+      const adapter = fake((name) => {
+        if (name === "task_relation") return fakeScore(4, 0, 0.9);
+        if (name === "change_kind") return fakeChoice(KINDS, "behavior_change", 0.9);
+        if (name.startsWith("rule_")) return fakeChoice(RULE_LABELS, "applicable_and_violated", 0.9);
+        return undefined;
+      });
+      const packet = await check(
+        { task: "Rename the sum helper", rules: { text: fixture("rules.json"), source: "rules.json" } },
+        options(repo.root, adapter),
+      );
+      const hunk = section(packet, "task").find((result) => result.path === "src/sum.py")!;
+      assert.deepEqual(hunk.deterministicFlags, ["formatting_only"]);
+      assert.equal(hunk.disposition, "judged");
+      assert.ok(hunk.flags.includes("weak_task_relation"));
+      assert.ok(
+        packet.findings.some((finding) => finding.flag === "formatting_only"),
+        "kept as an observation",
+      );
+      const intent = adapter.requests.find((request) => "diffManifest" in request.state)!;
+      assert.deepEqual(intent.state.deterministicFlags, ["formatting_only"], "Jev sees the observation");
+      assert.ok(section(packet, "rules").length > 0, "rules are judged against the hunk too");
+      assert.ok(packet.findings.some((finding) => finding.flag === "rule_violation"));
+      assert.ok(!packet.notChecked.some((note) => note.includes("formatting-only")));
     } finally {
       repo.cleanup();
     }
@@ -169,7 +207,7 @@ describe("check: task section", () => {
     try {
       const limited = await check({ task: "Apply discount codes", maxHunks: 1 }, options(repo.root, fake()));
       assert.equal(limited.coverage.complete, false);
-      assert.ok(limited.limits.some((limit) => limit.includes("--max-hunks")));
+      assert.ok(limited.limits.some((limit) => limit.includes("policy hunk limit")));
       assert.ok(section(limited, "task").some((result) => result.error === "not judged: hunk limit"));
 
       const staged = await check({ task: "x", scope: "staged" }, options(repo.root, fake()));

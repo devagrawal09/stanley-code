@@ -318,7 +318,9 @@ export async function commentsSection(
     jobs.push({ comment, result, code, hunks, refs });
   }
   if (roots.length > maxComments)
-    limits.push(`only the first ${maxComments} of ${roots.length} comment threads are judged (--max-items)`);
+    limits.push(
+      `only the first ${maxComments} of ${roots.length} comment threads are judged (policy item limit)`,
+    );
   return { candidates: { comments: results }, judge };
 
   async function judge() {

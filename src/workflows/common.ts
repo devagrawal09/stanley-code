@@ -1,4 +1,5 @@
 import type { JsonObject } from "../core/types.ts";
+import type { DiffPresence } from "../core/workflow.ts";
 import { classifyPath, contentExclusionReason } from "./classify.ts";
 import { InputError } from "./errors.ts";
 import type { DiffFile, Hunk } from "./evidence.ts";
@@ -115,6 +116,18 @@ export async function loadDiff(
     hunks.push(...file.hunks);
   }
   return { source, files, hunks, excluded };
+}
+
+/**
+ * Whether the selection has a diff for workflows to judge. Safe untracked files count, exactly as `loadDiff`
+ * would include them, so routing sees the same diff the selected workflow will.
+ */
+export async function diffPresence(
+  dependencies: Pick<WorkflowDependencies, "source" | "evidence">,
+  selection: DiffSelection,
+): Promise<DiffPresence> {
+  const diff = await loadDiff(dependencies, selection);
+  return diff.source.text.trim() ? "present" : "absent";
 }
 
 export function hunkEvidence(hunk: Hunk): JsonObject {

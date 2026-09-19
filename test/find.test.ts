@@ -110,7 +110,7 @@ describe("find", () => {
       assert.equal(filtered.summary.candidates, 1);
       const limited = await find({ task: "charge", maxFiles: 10 }, options(repo.root, fake()));
       assert.equal(limited.coverage.complete, false);
-      assert.ok(limited.limits[0]!.includes("--max-files"));
+      assert.ok(limited.limits[0]!.includes("policy file limit"));
     } finally {
       repo.cleanup();
     }

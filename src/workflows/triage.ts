@@ -79,8 +79,10 @@ export async function triage(input: TriageInput, options: RunOptions): Promise<P
     input.maxItems ??
     (kind === "failures" ? TRIAGE_FAILURES_POLICY.defaultMaxItems : TRIAGE_COMMENTS_POLICY.defaultMaxItems);
 
-  const diff =
+  // An empty diff is no diff context: relation questions are only asked when there is something to relate to.
+  const loaded =
     input.diff === null ? null : await loadDiff(options.dependencies, input.diff ?? { scope: "worktree" });
+  const diff = loaded && loaded.hunks.length === 0 && !loaded.source.text.trim() ? null : loaded;
   const tracked = new Set(await workspace.trackedFiles());
   const run = await Run.start(TRIAGE, options, {
     kind,

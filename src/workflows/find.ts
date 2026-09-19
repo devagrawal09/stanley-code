@@ -239,10 +239,10 @@ async function inventory(source: WorkspaceSource, input: FindInput, tokens: stri
       contentExclusionReason(kind) ??
       (kind === "lockfile" ? "lockfile" : kind === "generated" ? "generated file" : null) ??
       (input.paths && input.paths.length > 0 && !matchesAnyGlob(path, input.paths)
-        ? "outside --paths"
+        ? "outside the requested paths"
         : null);
     if (reason) {
-      if (reason !== "outside --paths") excluded.push({ id: `file:${path}`, path, reason });
+      if (reason !== "outside the requested paths") excluded.push({ id: `file:${path}`, path, reason });
       continue;
     }
     const bytes = await source.fileSize(path);
@@ -529,14 +529,14 @@ export async function find(input: FindInput, options: RunOptions): Promise<Packe
   const gaps: string[] = [];
   for (const item of inv.excluded) run.setDisposition(item.id, "excluded");
 
-  // Every candidate participates in metadata screening up to --max-files. Above that, a
+  // Every candidate participates in metadata screening up to the policy file limit. Above that, a
   // deterministic lexical order decides who is screened and the rest are reported unjudged.
   const ordered = [...inv.candidates].sort((a, b) => b.lexical - a.lexical || a.path.localeCompare(b.path));
   const screened = ordered.slice(0, maxFiles);
   const unscreened = ordered.slice(maxFiles);
   if (unscreened.length > 0) {
     limits.push(
-      `${unscreened.length} of ${ordered.length} candidates exceeded --max-files ${maxFiles} and were not screened (lowest lexical overlap first)`,
+      `${unscreened.length} of ${ordered.length} candidates exceeded the policy file limit ${maxFiles} and were not screened (lowest lexical overlap first)`,
     );
   }
   const results = new Map<string, FindResult>();
@@ -552,7 +552,7 @@ export async function find(input: FindInput, options: RunOptions): Promise<Packe
       excerpt: null,
       relevance: null,
       probesRun: [],
-      error: unscreened.includes(candidate) ? "not screened: --max-files limit" : null,
+      error: unscreened.includes(candidate) ? "not screened: policy file limit" : null,
     });
     run.setDisposition(candidate.id, "unjudged");
   }

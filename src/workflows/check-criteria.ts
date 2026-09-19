@@ -184,7 +184,9 @@ export function criteriaSection(
   const units = diff.hunks.filter((hunk) => hunk.kind !== "lockfile" && hunk.kind !== "generated");
   const judgedUnits = units.slice(0, maxUnits);
   if (units.length > maxUnits) {
-    limits.push(`only ${maxUnits} of ${units.length} diff hunks were used as evidence (--max-evidence)`);
+    limits.push(
+      `only ${maxUnits} of ${units.length} diff hunks were used as evidence (policy evidence limit)`,
+    );
   }
   if (diff.hunks.length === 0) limits.push("the diff is empty; no criterion evidence exists");
   return {
