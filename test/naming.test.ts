@@ -82,10 +82,10 @@ describe("naming", () => {
     assert.deepEqual(lock.packages[""]?.bin, { stanley: "dist/cli.js" });
     const source = [
       "src/workflows/types.ts",
-      "src/cli/plugin-output.ts",
+      "src/cli/prompt-result.ts",
       "src/workflows/improve.ts",
       "src/adapters/recorder.ts",
-      "src/adapters/plugins.ts",
+      "src/adapters/workflows.ts",
     ].map((path) => readFileSync(join(ROOT, path), "utf8"));
     for (const schema of ["stanley.packet/v1", "stanley.run/v1", "stanley.prompt-result/v1"]) {
       assert.ok(
@@ -94,7 +94,7 @@ describe("naming", () => {
       );
     }
     assert.ok(source.some((text) => text.includes('STATE_DIRECTORY = ".stanley"')));
-    assert.ok(source.some((text) => text.includes('PLUGIN_DIRECTORY = ".stanley/plugins"')));
+    assert.ok(source.some((text) => text.includes('WORKFLOW_DIRECTORY = ".stanley/workflows"')));
     assert.match(readFileSync(join(ROOT, ".gitignore"), "utf8"), /^\.stanley\/$/m);
   });
 

@@ -25,7 +25,7 @@ export {
   pendingImprovements,
   promoteCandidate,
   QUARANTINE_DIRECTORY,
-  quarantinePluginFiles,
+  quarantineWorkflowFiles,
   readCandidate,
   runImprovementWorker,
   spawnImprovementWorker,
@@ -53,45 +53,78 @@ export {
   type PiAgentOptions,
   PiEventReader,
 } from "./adapters/pi.ts";
-export {
-  cleanupPlugins,
-  discoverPlugins,
-  formatPluginDiagnostic,
-  type LoadedPlugin,
-  type LoadPluginsOptions,
-  loadPlugins,
-  PLUGIN_DIRECTORY,
-  type PluginDiagnostic,
-  type PluginDirectoryChanges,
-  type PluginDiscovery,
-  type PluginLoadResult,
-  type PluginPhase,
-  type PluginSource,
-  pluginDirectoryChanges,
-  pluginDirectoryFingerprint,
-} from "./adapters/plugins.ts";
 export { ensureStateDirectory, STATE_DIRECTORY } from "./adapters/recorder.ts";
 export { redactJson, redactText } from "./adapters/redact.ts";
 export { parseTestRecords } from "./adapters/test-records.ts";
-// cli: internal workflow registry, the plugin judge primitive, and output formatting
-export { createPluginJudge, type PluginJudgeOptions } from "./cli/judge.ts";
-export { EXIT, exitCodeFor, renderHuman } from "./cli/output.ts";
+// adapters: repository workflow discovery and loading
 export {
-  type CandidateMetadata,
-  createDefaultRegistry,
+  cleanupWorkflows,
+  discoverWorkflows,
+  formatWorkflowDiagnostic,
+  type LoadedWorkflow,
+  type LoadWorkflowsOptions,
+  loadWorkflows,
+  WORKFLOW_DIRECTORY,
+  type WorkflowDiagnostic,
+  type WorkflowDirectoryChanges,
+  type WorkflowDiscovery,
+  type WorkflowLoadPhase,
+  type WorkflowLoadResult,
+  type WorkflowSource,
+  workflowDirectoryChanges,
+  workflowDirectoryFingerprint,
+} from "./adapters/workflows.ts";
+// cli: the built-in workflows, the registry, the router, the runtime, the judge primitive, and output
+export {
+  BUILTINS,
+  type Builtin,
+  type BuiltinHost,
+  type BuiltinInput,
+  type BuiltinInvocation,
+  type BuiltinName,
+  builtinWorkflows,
+  inputText,
+  isBuiltinName,
+  runBuiltin,
+} from "./cli/builtins.ts";
+export { createWorkflowJudge, type WorkflowJudgeOptions } from "./cli/judge.ts";
+export { EXIT, exitCodeFor, renderHuman, UsageError } from "./cli/output.ts";
+export {
+  jsonPromptResult,
+  PROMPT_RESULT_SCHEMA,
+  packetPromptResult,
+  promptResultExitCode,
+  renderPromptResult,
+  unsupportedPromptResult,
+} from "./cli/prompt-result.ts";
+export {
+  createRegistry,
   DuplicateWorkflowIdError,
   RESERVED_WORKFLOW_IDS,
   type RegisteredWorkflow,
+  type Registration,
   ReservedWorkflowIdError,
-  registerRepositoryPlugins,
-  WORKFLOWS,
-  type WorkflowDefinition,
+  registerRepositoryWorkflows,
   type WorkflowKind,
-  type WorkflowName,
   type WorkflowOrigin,
   WorkflowRegistry,
 } from "./cli/registry.ts";
-export { BUILTIN_ROUTING_CRITERIA, type RoutingCandidate } from "./cli/router.ts";
+export {
+  CANNOT_TELL,
+  ROUTING_POLICY,
+  type RoutingCandidate,
+  type RoutingContext,
+  type RoutingDecision,
+  type RoutingDependencies,
+  RoutingError,
+  routeIntent,
+} from "./cli/router.ts";
+export {
+  type FallbackReason,
+  PROMPT_LIMITS,
+  WorkflowRuntime,
+  type WorkflowRuntimeOptions,
+} from "./cli/runtime.ts";
 // core: generic frames, questions, validation, budgets, batching, and execution
 export { mapPool, shard, withSplitting } from "./core/batch.ts";
 export { Budget, type BudgetDenial, type BudgetLimits, estimateTokens } from "./core/budget.ts";
@@ -105,35 +138,6 @@ export {
 } from "./core/executor.ts";
 export { createFrame } from "./core/frame.ts";
 export { hashValue, stableId, stableStringify } from "./core/hash.ts";
-// core: public plugin contract and control-envelope validation
-export {
-  completePluginResult,
-  createPluginLog,
-  isPluginValue,
-  JUDGE_LIMITS,
-  type JudgeFailure,
-  type JudgeFn,
-  type JudgeRequest,
-  type JudgeResult,
-  PLUGIN_ID_PATTERN,
-  PLUGIN_STATUSES,
-  type Plugin,
-  type PluginFactory,
-  type PluginInitContext,
-  type PluginLog,
-  type PluginLogLevel,
-  type PluginLogRecord,
-  type PluginRunContext,
-  type PluginStatus,
-  PluginValidationError,
-  type PluginValue,
-  type PromptFn,
-  type PromptResult,
-  pluginRoutingMetadata,
-  validateJudgeRequest,
-  validatePlugin,
-  validatePluginFactory,
-} from "./core/plugin.ts";
 export { choice, noul, type Question, type Questions, score } from "./core/questions.ts";
 export type {
   Frame,
@@ -158,6 +162,41 @@ export {
   type TypedAnswer,
   ValidationError,
 } from "./core/validation.ts";
+// core: the public workflow contract and control-envelope validation
+export {
+  CONTROL_FIELDS,
+  createWorkflowLog,
+  type DiffPresence,
+  FORBIDDEN_FIELDS,
+  type InputShape,
+  isPromptResult,
+  isWorkflowValue,
+  JUDGE_LIMITS,
+  type JudgeFailure,
+  type JudgeFn,
+  type JudgeRequest,
+  type JudgeResult,
+  type PromptFn,
+  type PromptResult,
+  type RoutingFacts,
+  validateJudgeRequest,
+  validateWorkflow,
+  validateWorkflowFactory,
+  WORKFLOW_ID_PATTERN,
+  WORKFLOW_STATUSES,
+  type Workflow,
+  type WorkflowFactory,
+  type WorkflowInitContext,
+  type WorkflowLog,
+  type WorkflowLogLevel,
+  type WorkflowLogRecord,
+  type WorkflowRunContext,
+  type WorkflowStatus,
+  WorkflowValidationError,
+  type WorkflowValue,
+  workflowResult,
+  workflowRoutingMetadata,
+} from "./core/workflow.ts";
 // workflows: the coding-agent port, delegation fallback, and self-improvement model
 export {
   AGENT_LIMITS,
@@ -201,6 +240,7 @@ export {
 export { parseCriteria } from "./workflows/check-criteria.ts";
 export { parseRules } from "./workflows/check-rules.ts";
 export { classifyPath, globToRegExp, isSecretPath } from "./workflows/classify.ts";
+export { diffPresence, loadDiff } from "./workflows/common.ts";
 export { InputError } from "./workflows/errors.ts";
 export type {
   DiffFile,

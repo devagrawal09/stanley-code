@@ -1,5 +1,5 @@
-import type { PromptResult } from "../core/plugin.ts";
 import type { JsonObject } from "../core/types.ts";
+import type { PromptResult } from "../core/workflow.ts";
 import type { Packet } from "../workflows/types.ts";
 import { EXIT, type HumanSection, renderHuman } from "./output.ts";
 
