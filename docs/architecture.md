@@ -20,7 +20,7 @@ including `import type`, dynamic `import()` and `require()`, and fails the build
 
 | Folder      | Job                                                                                                     | Must not use                                                         |
 | ----------- | ------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
-| `core`      | Send structured questions to Jev safely: validate answers, enforce budgets, batch, retry; plugin contract | npm packages, `fs`, `child_process`, the SDK; only `node:` built-ins |
+| `core`      | Send structured questions to Jev safely: validate answers, enforce budgets, batch, retry; the workflow contract | npm packages, `fs`, `child_process`, the SDK; only `node:` built-ins |
 | `workflows` | Product logic: gather evidence, run exact checks, ask questions, turn answers into a report; agent port and improvement model | any package or Node built-in, `process.env`, the SDK                 |
 | `adapters`  | Real implementations of the ports: read-only Git, file reads, parsers, redaction, SDK client, Pi, the improvement queue | the `cli` folder                                                     |
 | `cli`       | Parse arguments, wire adapters into workflows, route, delegate, print output, choose the exit code      | nothing                                                              |
@@ -32,25 +32,30 @@ production file must live in one of the four folders. Tests and scripts may impo
 
 Using `check` as the example:
 
-1. **cli** parses the natural-language request and flags, reads `TYPESAFE_API_KEY` and `TYPESAFE_MODEL`
+1. **cli** parses the natural-language request and the few host options (`--input`, `--scope`, `--base`,
+   `--repo`, `--json`, `--no-persist`, `--no-agent`), reads `TYPESAFE_API_KEY` and `TYPESAFE_MODEL`
    through `adapters/config.ts`, builds the dependencies in `adapters/dependencies.ts`, and resolves the
    coding agent from the environment (`adapters/pi.ts`): `null` when `--no-agent`, `STANLEY_AGENT=off`,
    `STANLEY_NESTED` is set, or no `pi` binary is installed.
-2. **plugin loading** (`adapters/plugins.ts`) discovers trusted `.ts`, `.js`, and package plugins under
-   `.stanley/plugins/`, imports them through `tsx`, awaits their factories, quarantines individual failures,
-   and registers valid plugins beside the ten built-ins. Duplicate IDs fail registration. If validated
-   improvement candidates await review, one stderr line says so; if improvement jobs are pending and no worker
-   is alive, a worker is started (see below).
-3. **routing** (`cli/router.ts`) receives the redacted request plus deterministic context: diff presence,
-   input shape, available capabilities, supplied option names, and JSON routing metadata for every registered
-   workflow. One validated choice selects a candidate or `cannot_tell`. Fixed confidence and capability gates
-   turn uncertain or unavailable choices into the built-in fallback; the *reason* is kept because it decides
-   whether the agent may be used.
+2. **registration** (`cli/builtins.ts`, `cli/registry.ts`, `adapters/workflows.ts`) builds the ten built-ins as
+   ordinary workflow objects bound to this invocation, then discovers trusted `.ts`, `.js`, and package
+   workflows under `.stanley/workflows/`, imports them through `tsx`, awaits their factories, quarantines
+   individual failures, and registers valid ones beside the built-ins. Duplicate IDs fail registration. If
+   validated improvement candidates await review, one stderr line says so; if improvement jobs are pending and
+   no worker is alive, a worker is started (see below).
+3. **routing** (`cli/router.ts`) receives the redacted request plus deterministic facts: diff presence
+   (`workflows/common.ts#diffPresence`, which counts safe untracked files exactly as workflows load them),
+   input shape, and, from the registry, every workflow's JSON routing metadata and its
+   `available` verdict on those facts. One validated choice selects a candidate or `cannot_tell`. Fixed
+   confidence thresholds (`ROUTING_POLICY`) and the capability verdicts turn uncertain or unavailable choices
+   into the built-in fallback; the *reason* is kept because it decides whether the agent may be used.
 4. **workflow** (`workflows/check.ts`) validates every input, asks the source port for the diff once, and
    has the evidence port parse it into hunks (changed blocks). It skips secret-shaped paths, binaries and
    vendored files, starts one `Run`, and hands the diff to its sections.
 5. **Exact checks** run in code first (`workflows/hunks.ts`, `classify.ts`): skip markers, removed assertions,
-   deleted tests, lockfile, CI and config changes. Some pieces are settled here and never reach Jev.
+   deleted tests, whitespace-only edits, lockfile, CI and config changes. Lockfile and generated hunks are
+   settled here and never reach Jev; every other signal, including `formatting_only`, is an observation that
+   accompanies the hunk to Jev rather than a reason to skip it.
 6. **Questions.** For each remaining piece, the workflow builds a request: a small JSON state plus
    fixed-choice questions (yes/no, choice or score). `workflows/run.ts` redacts it and hands it to
    `core/executor.ts`, which reserves budget, calls the Jev port, validates the answer shape and retries
@@ -58,10 +63,10 @@ Using `check` as the example:
    run, the piece is marked unjudged instead. This lives in `core`, so it is the same for every workflow.
 7. **Decisions** are made in code with fixed, versioned thresholds (`workflows/policy.ts`), not by the model.
    Unclear answers are "parked" for a human to look at.
-8. **Result.** `Run` builds an internal `stanley.packet/v1` packet. `cli/plugin-output.ts` projects built-in
+8. **Result.** `Run` builds an internal `stanley.packet/v1` packet. `cli/prompt-result.ts` projects built-in
    output to workflow-neutral `{ status, output: { text, data } }`; JSON CLI output uses
-   `stanley.prompt-result/v1` and omits workflow and run identity. Raw plugin text/JSON is normalized to
-   `{ status: "complete", output }`.
+   `stanley.prompt-result/v1` and omits workflow and run identity. A repository workflow's raw text/JSON is
+   normalized to `{ status: "complete", output }`, or kept as-is when it returns its own `{ status, output }`.
 
 On this path the coding agent is never invoked, nothing is queued, and no worker is started; the smoke test and
 `test/agent.test.ts` assert exactly that.
@@ -72,9 +77,10 @@ When step 3 finds no workflow, `cli.ts` decides between two fallbacks:
 
 - **Delegate** (`workflows/agent.ts`, `adapters/pi.ts`) when an agent is available, the shared budget is not
   exhausted, and the request is *confidently* unsupported: an action request (`implement`, `fix`, `deploy`,
-  `run the tests`, …) that no plugin claims, or a request the router explicitly placed outside every workflow.
+  `run the tests`, …) that no repository workflow claims, or a request the router explicitly placed outside
+  every workflow.
   The agent receives `delegationInstructions(request, input)` on stdin, the invocation's abort signal, and a
-  wall-clock limit (`--agent-timeout-seconds`, default 600 s). `delegationResult()` turns the run into the
+  wall-clock limit (600 s, fixed policy). `delegationResult()` turns the run into the
   same `PromptResult` envelope: `complete` only when the agent finished its turn, `incomplete` on timeout,
   cancellation or failure, always prefixed "handled by an external coding agent; Stanley did not verify the
   result", with `output.data.handledBy = "coding_agent"` and a `notChecked` list. Exit codes follow the status.
@@ -85,8 +91,8 @@ When step 3 finds no workflow, `cli.ts` decides between two fallbacks:
 Nested `prompt()` calls never delegate; an agent is not a composable sub-workflow. Every agent subprocess runs
 with `STANLEY_NESTED=1`, so an agent that runs `stanley` itself gets a Stanley that cannot delegate or queue.
 
-The plugin directory is guarded around every delegation: `cli.ts` fingerprints `.stanley/plugins/` before and
-after the agent run. Files the agent added are moved to `.stanley/quarantine/<stamp>/` (never deleted) and
+The workflow directory is guarded around every delegation: `cli.ts` fingerprints `.stanley/workflows/` before
+and after the agent run. Files the agent added are moved to `.stanley/quarantine/<stamp>/` (never deleted) and
 files it modified or removed are reported; both appear as stderr warnings and in the result's `notChecked`. A
 task agent can therefore edit the repository but cannot silently activate a workflow; activation stays with
 `--promote-candidate`.
@@ -117,13 +123,13 @@ and no live worker starts one, so a killed worker never strands the queue. `stan
 same loop in the foreground; that is what the smoke test and `test/improvements.test.ts` use.
 
 **One job.** The worker snapshots `git status` and the worktree diff, runs the agent with
-`improvementInstructions()`, a brief that states the plugin contract, the Jev-first design rule, the reserved
-ids, the active plugins as examples, and the shipped reference workflow (`examples/plugins/stale-todo-audit.ts`,
-byte-identical to the embedded copy), and tells the agent to write exactly one file under
-`.stanley/candidates/<job>/` or nothing. It then validates:
+`improvementInstructions()`, a brief that states the workflow contract, the Jev-first design rule, the reserved
+ids, the active repository workflows as examples, and the shipped reference workflow
+(`examples/workflows/stale-todo-audit.ts`, byte-identical to the embedded copy), and tells the agent to write
+exactly one file under `.stanley/candidates/<job>/` or nothing. It then validates:
 
-1. the candidate directory loads through `loadPlugins()` with exactly one valid plugin and no quarantine;
-2. the id is not a built-in or active plugin id;
+1. the candidate directory loads through `loadWorkflows()` with exactly one valid workflow and no quarantine;
+2. the id is not a built-in or active repository workflow id;
 3. nothing outside the candidate directory changed (new status entries or a changed worktree diff), checked
    after the agent run *and again after the candidate module was imported and its factory awaited*, because
    loading executes agent-authored top-level code; such changes are reported, never reverted;
@@ -132,22 +138,31 @@ byte-identical to the embedded copy), and tells the agent to write exactly one f
 The record `candidate.json` is `validated` or `rejected` with reasons. A job whose agent timed out or crashed
 without writing outside its directory is retried once; every other outcome is final. A candidate's `run` never
 executes before promotion; its module top level and factory execute during validation and promotion, exactly as
-any plugin load does.
+any repository workflow load does.
 
 **Activation is explicit.** `stanley --promote-candidate <id>` re-validates the candidate, refuses duplicate
-ids and existing destinations, and moves the file into `.stanley/plugins/`, the only part of `.stanley/` that
-Git sees. From then on the promoted workflow is an ordinary trusted plugin: the router selects it, it runs
-deterministic code, and it asks Jev through `judge`. Nothing is activated automatically.
+ids and existing destinations, and moves the file into `.stanley/workflows/`, the only part of `.stanley/` that
+Git sees. From then on the promoted workflow is an ordinary trusted repository workflow: the router selects it,
+it runs deterministic code, and it asks Jev through `judge`. Nothing is activated automatically.
 
-## Plugins, `prompt`, and `judge`
+## One workflow contract: registry, runtime, `prompt`, and `judge`
 
-Built-ins, repository plugins, and promoted candidates share one `WorkflowRegistry`, one `PromptResult`
-envelope, and one budget tree. A plugin `run` receives `{ request, input, root, prompt, judge, signal, log }`:
+`core/workflow.ts` defines the single `Workflow` contract: `id`, `run(context)`, and optional
+`available(facts)` (a deterministic eligibility gate over diff presence and input shape) and `cleanup`; every
+other field is JSON routing metadata, and an `options` field is rejected because workflows cannot add CLI
+flags. Built-ins (`cli/builtins.ts`) are typed descriptions (info, routing text, gate, whether input is
+consumed, typed run, renderer, and how to derive typed input from the request and input) turned into
+`Workflow` objects bound to one invocation; repository workflows and
+promoted candidates are the file-based form of the same contract. All of them live in one `WorkflowRegistry`
+(`cli/registry.ts`), which is the only source of routing candidates, capability verdicts, and executables. One
+`WorkflowRuntime` (`cli/runtime.ts`) runs whichever workflow was selected and composes child prompts. A
+workflow `run` receives `{ request, input, root, prompt, judge, signal, log }` and nothing else; the request
+is the task and the semantic instructions, the input is the one piece of external evidence:
 
 - `prompt(instructions, input?)` composes by intent: the router picks whichever available workflow fits.
 - `judge({ scope, state, questions })` asks Jev bounded fixed-choice questions (`noul`, `choice`, `score`)
-  about evidence the plugin supplies. `cli/judge.ts` builds it on the same `FrameExecutor` built-ins use, with
-  request validation (`core/plugin.ts`), redaction, the shared budget, answer validation
+  about evidence the workflow supplies. `cli/judge.ts` builds it on the same `FrameExecutor` built-ins use,
+  with request validation (`core/workflow.ts`), redaction, the shared budget, answer validation
   (`core/validation.ts#readAnswers`), and a cap of 64 calls per run and 8 questions per call. It returns
   `{ ok: true, answers }` or `{ ok: false, reason }` and never throws.
 
@@ -155,13 +170,15 @@ envelope, and one budget tree. A plugin `run` receives `{ request, input, root, 
 
 `core` knows nothing about diffs, logs, tests, findings, files, redaction rules, agents or the SDK. It only
 knows how to send a question set through a `JevPort`, check the reply against the questions asked, stay within
-request, token and time budgets, and validate the plugin control envelope. Keeping product meaning out of
+request, token and time budgets, and validate the workflow control envelope. Keeping product meaning out of
 `core` means every workflow and every `judge` call gets the same budget, retry and validation behavior, and
 `core` can be tested with a fake port and no I/O.
 
 Built-ins use Jev as a probabilistic zero-shot classifier and ranker, not as a code-writing or free-form review
 agent. Frames present bounded evidence and explicit labels. Built-ins retain distributions and combine related
-probability mass in code. The separate intent router may select a trusted action-capable plugin.
+probability mass in code; deterministic pattern matches (a `formatting_only` hunk, a compiler-error or network
+signature in a log) travel with the evidence as observations and never replace a judgment. The separate intent
+router may select a trusted action-capable repository workflow.
 
 ## Safety boundaries
 
@@ -172,15 +189,15 @@ probability mass in code. The separate intent router may select a trusted action
   SDK or `process.env`, so every side effect goes through a port that the architecture test can see.
 - **Host-managed routing, built-in evidence, `judge` state, agent output, and improvement records are redacted
   first**, through `RedactionPort` and the recorder. Redaction is best effort, not a secret scanner; trusted
-  plugins control their own I/O.
+  repository workflows control their own I/O.
 - **Repository text is untrusted evidence.** Workflows ask Jev whether a piece contains text aimed at an
   automated reviewer and flag it. That is a hint, not a prompt-injection defense. Built-in evidence answers never
-  trigger actions; only intent routing can select an explicitly trusted plugin.
-- **Plugins are explicitly trusted.** Repository plugins run in-process and may use filesystem, shell, network,
+  trigger actions; only intent routing can select an explicitly trusted repository workflow.
+- **Repository workflows are explicitly trusted.** They run in-process and may use filesystem, shell, network,
   environment, and Git APIs directly. They are offered mutating requests before the fallback. Users must review
-  plugin source as they would any repository script. Promotion is the moment an agent-authored candidate
+  workflow source as they would any repository script. Promotion is the moment an agent-authored candidate
   becomes trusted, which is why it is manual.
-- **The coding agent is trusted like a plugin and bounded like a workflow.** It is enabled only by installing
+- **The coding agent is trusted like a repository workflow and bounded like a built-in.** It is enabled only by installing
   Pi (or `STANLEY_PI_BIN`), can be disabled per run or per environment, receives a hard time limit and the
   invocation's abort signal, and cannot recurse into another delegation. Stanley never claims to have
   verified its work.
@@ -202,15 +219,15 @@ For built-in workflow runs, unless `--no-persist` is set, `adapters/recorder.ts`
 `.stanley/runs/<run-id>/`: `manifest.json`, `inputs.json`, `candidates.json`, `packet.json`, and when relevant
 `decisions.ndjson`, `events.ndjson` and `frames.ndjson` (every Jev request and response). Files are `0600`,
 directories `0700`. `.stanley/.gitignore` ignores generated state (`runs/`, `improvements/`, `candidates/`)
-while explicitly allowing `plugins/` to be committed.
+while explicitly allowing `workflows/` to be committed.
 
-## Routing targets, workflows and sections
+## Built-in workflows and sections
 
-The public CLI has no workflow subcommands or explicit route override. Its ten built-in targets are safe,
-typed entry points in `cli/registry.ts`; repository plugins and promoted candidates join the same registry
-dynamically:
+The public CLI has no workflow subcommands or explicit route override. Its ten built-ins are described once
+each in `cli/builtins.ts` (`BUILTINS`) and registered as ordinary workflows; repository workflows and promoted
+candidates join the same registry dynamically. There is no static list of router outcomes anywhere else:
 
-| Router target          | Module                       | Function                | Packet `workflow`         |
+| Built-in id            | Module                       | Function                | Packet `workflow`         |
 | ---------------------- | ---------------------------- | ----------------------- | ------------------------- |
 | `find`                 | `workflows/find.ts`          | `find()`                | `find@1`                  |
 | `check`                | `workflows/check.ts`         | `check()`               | `check@1`                 |
@@ -223,8 +240,9 @@ dynamically:
 | `performance_review`   | `workflows/analyze-diff.ts` | `performanceReview()`   | `performance_review@1`    |
 | `compatibility_review` | `workflows/analyze-diff.ts` | `compatibilityReview()` | `compatibility_review@1`  |
 
-`cannot_tell` is an internal router outcome, not a public workflow result. It invokes the fallback described
-above. `test/cli.test.ts` fixes the built-in target set and exercises each typed entry point.
+`cannot_tell` is the router's own reserved label, not a workflow result; no workflow may claim it. It invokes
+the fallback described above. `test/cli.test.ts` fixes the built-in set and exercises each typed entry point;
+`test/workflow.test.ts` covers the contract, registry, and runtime.
 
 `check` and `triage` are built from **sections**. A section is not a workflow: it has no `WorkflowInfo`, never
 starts a `Run`, and never loads a diff. The workflow does those once and passes them in. A section plans its
@@ -240,23 +258,24 @@ into the single packet.
 - Six diff-analysis entry points share `analyze-diff.ts`, but each fixes a distinct taxonomy, policy, run name
   and router target. Jev classifies one hunk at a time. Code combines probability mass across related concern
   labels, applies importance and evidence gates, and parks material concerns that need outside context. A
-  deterministic mode-specific priority controls bounded `--max-hunks` runs.
+  deterministic mode-specific priority controls runs bounded by the policy hunk cap.
 
 Thresholds stay with the section that uses them, each with its own policy version (for example
 `check-task-policy@1`), so a decision record always names the policy that made it.
 
 ## Adding a workflow
 
-The preferred way is a plugin file: write `.stanley/plugins/<id>.ts` in the shape of
-`examples/plugins/stale-todo-audit.ts` (deterministic evidence, `judge` for the fixed-choice parts, code for
-the decision), or let the improvement loop draft one and promote it after review. Add a built-in only when the
-workflow needs typed CLI options or sections:
+The preferred way is a repository workflow: write `.stanley/workflows/<id>.ts` in the shape of
+`examples/workflows/stale-todo-audit.ts` (deterministic evidence, `judge` for the fixed-choice parts, code for
+the decision), or let the improvement loop draft one and promote it after review. Declare `available` if it
+needs a deterministic gate; it cannot declare CLI flags, so anything it needs comes from the request and the
+input. Add a built-in only when the workflow needs typed sections or a persisted run record:
 
 1. Add `src/workflows/<name>.ts`. Export a `WorkflowInfo` and a typed run function that uses only ports from
    `workflows/ports.ts` and the `Run` helper. Put thresholds in code with a policy version. Prefer a new section
-   of an existing workflow over a new routing target.
+   of an existing workflow over a new built-in.
 2. If it needs a new kind of outside input, add a method to a port and implement it in `adapters/`.
-3. Add a fixed outcome and criteria to `src/cli/router.ts`, including a deterministic capability gate. Register
-   the typed target and human renderer in `src/cli/registry.ts`, then add its input handling in `src/cli.ts`.
+3. Describe it once in `src/cli/builtins.ts`: routing text, `available` gate, whether it consumes input, how to
+   derive typed input from the request and input, and the human renderer. Nothing else needs to change.
 4. Add routing and workflow tests with the fake Jev adapter (`adapters/fake-jev.ts`) and, where an agent is
    involved, the fake agent (`adapters/fake-agent.ts`), then run `npm run check`.

@@ -1,5 +1,10 @@
 # Direct Pi CLI versus Stanley: a live comparison
 
+> **Historical report.** This run predates decision D-16 in [decision-log.md](decision-log.md): repository
+> plugins are now called repository workflows and live in `.stanley/workflows/` (then `.stanley/plugins/`),
+> `candidate.json` records `workflowId` (then `pluginId`), and the reference example is
+> `examples/workflows/stale-todo-audit.ts`. Paths and field names below are quoted as observed at the time.
+
 **Run:** 2026-09-19, 14:21–14:26 UTC · **Pi:** `@earendil-works/pi-coding-agent` 0.85.1, provider `openai-codex`
 (OAuth; `pi auth check --provider openai-codex --json --no-refresh` → `{"status":"ready",…,"authType":"oauth"}`),
 model `openai-codex/gpt-5.5` · **Stanley reference:** the live tracer of the same day,

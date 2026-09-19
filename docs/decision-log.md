@@ -2,8 +2,9 @@
 
 Durable record of product, architecture, and security decisions, newest last. Each entry states the decision,
 the alternatives considered, and why. Entries are never edited after the fact; a later entry supersedes an
-earlier one by reference. Plugin-system decisions that predate this log live in
-[plugin-design-decisions.md](plugin-design-decisions.md).
+earlier one by reference. Workflow-system decisions that predate this log live in
+[workflow-design-decisions.md](workflow-design-decisions.md) (entries before D-16 call repository workflows
+"plugins" and their directory `.stanley/plugins/`; both were renamed in D-16).
 
 ## D-01 (2026-09-18) Product name: Stanley
 
@@ -226,3 +227,83 @@ log and in the statement that the placeholder package was previously published u
 
 **Reason.** The product name is Stanley and the repository should no longer reinforce the old brand. The
 repository rename is now explicitly authorized, unlike the earlier D-02 decision.
+
+## D-16 (2026-09-19) One workflow contract; "plugins" become repository workflows
+
+**Decision.** Stanley has one workflow concept. The public `Plugin` contract and the internal built-in
+`WorkflowDefinition` are merged into a single `Workflow` (`src/core/workflow.ts`): `id`, `run(context)`,
+optional `options` (accepted CLI option names), optional `available(facts)` (a deterministic eligibility gate
+over diff presence and input shape), optional `cleanup`, and JSON routing metadata for everything else.
+Built-ins are constructed as ordinary `Workflow` objects (`src/cli/builtins.ts`) and registered in the same
+`WorkflowRegistry` as repository workflows; one `WorkflowRuntime` executes both. The registry is the sole
+source of routing metadata, capabilities, and executables: the router's static outcome list, the separate
+built-in dispatch tables, and the per-workflow option map in the CLI are gone. Repository workflows are
+discovered from `.stanley/workflows/` (formerly `.stanley/plugins/`); every plugin-named identifier, file, doc,
+and message is renamed, with no aliases, because nothing with the old names was released (D-12).
+
+Two contract additions follow from unification. First, `run` may return `{ status, output }` to set its own
+status; built-ins need this for `incomplete` and `budget_exhausted`, so repository workflows get it too.
+Second, the top-level `run` receives `context.options`, the values of the options the workflow declared.
+Nested prompts still inherit operational context only. This supersedes the earlier principle that parsed CLI
+options are never exposed: they are exposed only when declared, and a repository workflow that declares none
+keeps the previous behavior (`--input`, `--scope`, `--base`).
+
+**Correctness fixes in the same change.** (1) `check` no longer skips Jev for hunks whose added and removed
+lines squash to the same text; whitespace can change behavior (indentation, templates, literals), so
+`formatting_only` is now an info-level observation Jev also sees, not a reason to skip the task or rules
+sections. (2) Failure triage no longer lets regex signatures decide: a compile-error match no longer forces
+`failureKind`, and an environment match no longer forces `relation` or parks a conflict. They remain in
+`observed`, in the frame state, and as info findings (`compile_error_signature`, `environment_signature`).
+The structural stack-touches-changed-file conflict stays. Policy version `triage-failures-policy@3`. (3)
+Routing's "diff present" fact is computed with `diffPresence()`, which loads the diff exactly as workflows do,
+so safe untracked files count and secret-shaped ones do not.
+
+**Alternatives.** Keep two contracts and adapt built-ins into plugin objects at registration (rejected: two
+sources of truth for options and eligibility remain); pass a `depth` flag instead of `context.options`
+(rejected: less useful and still needs the CLI to own per-workflow option parsing); expose all parsed options to
+every workflow (rejected: undeclared options are usage errors and should stay that way); a JSON manifest per
+workflow (rejected: the module is the manifest; no configuration language).
+
+**Enforcement.** `test/workflow.test.ts` (contract, registry, runtime), `test/cli.test.ts` (untracked-only
+routing), `test/check.test.ts` (whitespace-sensitive hunks are judged), `test/triage.test.ts` (regex hints do
+not override Jev), and `test/naming.test.ts` (`WORKFLOW_DIRECTORY`).
+
+## D-17 (2026-09-19) The command line is minimal; workflows cannot add flags
+
+**Decision.** The public CLI is reduced to host controls that cannot be stated safely in prose: `--input`,
+`--scope`, `--base`, `--repo`, `--json`, `--no-persist`, `--no-agent`, `--help`, `--version`, plus the
+administrative `--improve-worker` and `--promote-candidate`. Every workflow-specific flag is gone
+(`--task`, `--task-file`, `--task-source`, `--rules`, `--criteria`, `--criteria-file`, `--test-results`,
+`--max-hunks`, `--max-pairs`, `--max-evidence`, `--max-items`, `--max-files`, `--top`, `--excerpts`,
+`--paths`, `--no-diff`), and so are the tuning flags (`--model`, `--concurrency`, `--max-requests`,
+`--max-input-tokens`, `--timeout-seconds`, `--agent-timeout-seconds`). The request is the task and the
+semantic instructions; one generic `--input` (or piped stdin) is the only external evidence. The `Workflow`
+contract loses the `options` control field introduced in D-16, `WorkflowRunContext.options` is gone, and a
+workflow that declares `options` fails validation. Built-ins derive typed input from the request and the input
+alone: `check` reads a rules document or acceptance criteria by shape, triage reads a log or comment JSON,
+and the diff is attached whenever the selection has one.
+
+**Retained, and why.** `--scope`/`--base` name exact Git refs; guessing a ref from prose would be unsafe and
+would reintroduce intent parsing. `--repo` is where the repository is. `--input` is the one evidence slot.
+`--json` and `--no-persist` are output and privacy controls. `--no-agent` is an explicit safety switch (the
+environment variable `STANLEY_AGENT=off` does the same). The model stays selectable through `TYPESAFE_MODEL`;
+Pi through `STANLEY_PI_BIN` and `STANLEY_AGENT_MODEL`.
+
+**Fixed instead of flags.** The invocation budget (`DEFAULT_TREE_BUDGET`), per-workflow budgets and hunk,
+pair, evidence, item, and file caps (each section's policy), the agent time limit (`AGENT_LIMITS`), and
+executor concurrency are policy constants. Embedders and tests may override the shared budget through
+`CliInjections.budget`; that is a library seam, not a flag.
+
+**Given up.** Test records as evidence for criteria need two inputs at once, so they are no longer reachable
+from the CLI; `check()` still accepts `testResults` for TypeScript workflows. Exact task text that differs from
+the request is no longer separable: the request is the task.
+
+**Alternatives.** Keep a small allowlist of workflow flags (rejected: every flag is a second way to say
+something the request should say); let workflows declare flags (rejected: the surface would grow with every
+workflow and nothing would keep it minimal); parse scope, limits, or criteria out of the request with patterns
+(rejected: intent parsing by regex is exactly what bounded Jev judgment replaces); a config file for defaults
+(rejected: no configuration language).
+
+**Enforcement.** `test/cli.test.ts` asserts the documented option list, that every removed flag exits 64
+before anything is routed, and that unused input is a usage error; `test/workflow.test.ts` asserts that a
+workflow declaring `options` is rejected; the smoke run covers criteria and rules through `--input`.

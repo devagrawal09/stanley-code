@@ -1,5 +1,10 @@
 # Live Stanley tracer (real Pi, real Jev)
 
+> **Historical report.** This run predates decision D-16 in [decision-log.md](decision-log.md): repository
+> plugins are now called repository workflows and live in `.stanley/workflows/` (then `.stanley/plugins/`),
+> `candidate.json` records `workflowId` (then `pluginId`), and the reference example is
+> `examples/workflows/stale-todo-audit.ts`. Paths and field names below are quoted as observed at the time.
+
 **Run:** 2026-09-19, 14:03–14:07 UTC · **Host:** macOS (Darwin 25.5), Node v24.18.0 · **Stanley:** this worktree's
 uncommitted `stanley-code@0.1.0`, built with `npm run build` · **Jev:** TypeSafe `jev-1.13.0` via `TYPESAFE_API_KEY`
 (redacted) · **Coding agent:** Pi `@earendil-works/pi-coding-agent` 0.85.1, provider `openai-codex` (OAuth,
