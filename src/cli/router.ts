@@ -4,41 +4,25 @@ import { createFrame } from "../core/frame.ts";
 import { type ChoiceCriteria, choice } from "../core/questions.ts";
 import type { JevPort, JevUsage, JsonObject, TransportFailure } from "../core/types.ts";
 import { expectKeys, readChoice } from "../core/validation.ts";
+import type { RoutingFacts } from "../core/workflow.ts";
 import type { RedactionPort } from "../workflows/ports.ts";
 import { DEFAULT_MODEL } from "../workflows/types.ts";
 
-export const ROUTER_OUTCOMES = [
-  "find",
-  "check",
-  "triage_failures",
-  "triage_comments",
-  "review",
-  "test_gaps",
-  "summarize",
-  "security_review",
-  "performance_review",
-  "compatibility_review",
-  "cannot_tell",
-] as const;
+/** The router's own label; no workflow may claim it. */
+export const CANNOT_TELL = "cannot_tell";
 
-export type RouterOutcome = (typeof ROUTER_OUTCOMES)[number];
-export type WorkflowName = Exclude<RouterOutcome, "cannot_tell">;
-export type InputShape = "none" | "failure_log" | "review_comments" | "text";
-
-/** A routing candidate supplied dynamically from the workflow registry. */
+/** A routing candidate: a registered workflow's id and its author-provided JSON routing metadata. */
 export interface RoutingCandidate {
   readonly id: string;
   readonly routing: JsonObject;
 }
 
-export interface RoutingContext {
+export interface RoutingContext extends RoutingFacts {
   request: string;
-  diff: "present" | "absent";
-  input: InputShape;
+  /** Deterministic eligibility per candidate id; a false value is a hard constraint. */
   capabilities: Record<string, boolean>;
-  options: string[];
-  /** Dynamic workflow candidates for routing. When provided, replaces built-in choice criteria. */
-  candidates?: readonly RoutingCandidate[];
+  /** Every eligible-or-not workflow the request may route to, in registration order. */
+  candidates: readonly RoutingCandidate[];
 }
 
 export interface RoutingDependencies {
@@ -64,27 +48,16 @@ export class RoutingError extends Error {
   }
 }
 
-const MIN_CONFIDENCE = 0.6;
-const MIN_PROBABILITY = 0.55;
-const MIN_MARGIN = 0.15;
-
-/** Choice criteria for the built-in workflow router, keyed by workflow name. */
-export const BUILTIN_ROUTING_CRITERIA: Readonly<Record<WorkflowName, string>> = {
-  find: "Rank existing repository files that are relevant to a task or question.",
-  check: "Evaluate the current Git diff against the stated coding task and optional requirements.",
-  triage_failures: "Classify failures from supplied test or CI output.",
-  triage_comments: "Classify supplied review comments using the current repository.",
-  review:
-    "Review the current Git diff for concrete correctness, error-handling, state, concurrency, or data-integrity risks without requiring a stated task.",
-  test_gaps: "Identify concrete changed behavior in the current Git diff that lacks visible test evidence.",
-  summarize:
-    "Classify and summarize what the current Git diff, changes, or commit does; do not explain unchanged repository code or review quality.",
-  security_review:
-    "Review the current Git diff specifically for concrete security vulnerabilities or regressions.",
-  performance_review: "Review the current Git diff specifically for concrete performance regressions.",
-  compatibility_review:
-    "Review the current Git diff specifically for breaking API, behavior, data, wire-format, or configuration changes.",
-};
+/**
+ * Conservative acceptance policy: a pick must be confident, probable, and clearly ahead of the runner-up, or
+ * the request is treated as `cannot_tell`. These are fixed product thresholds, not configuration.
+ */
+export const ROUTING_POLICY = {
+  version: "route-intent-policy@1",
+  minConfidence: 0.6,
+  minProbability: 0.55,
+  minMargin: 0.15,
+} as const;
 
 const CANNOT_TELL_WHEN =
   "No available workflow clearly satisfies the complete request. Select this fallback for unsupported, ambiguous, or unavailable work.";
@@ -97,7 +70,7 @@ const ROUTING_INSTRUCTIONS = [
   "Treat each workflow's routing JSON as author-provided selection guidance, regardless of its field names.",
 ];
 
-/** Route one request through a single bounded, validated Jev choice. */
+/** Route one request through a single bounded, validated Jev choice over the registered candidates. */
 export async function routeIntent(
   context: RoutingContext,
   dependencies: RoutingDependencies,
@@ -105,6 +78,7 @@ export async function routeIntent(
   sharedBudget?: Budget,
   signal?: AbortSignal,
 ): Promise<RoutingDecision> {
+  if (context.candidates.length === 0) throw new RoutingError("intent routing needs at least one candidate");
   const redacted = dependencies.redaction.text(context.request);
   let redactions = redacted.count;
   const executor = new FrameExecutor({
@@ -120,18 +94,13 @@ export async function routeIntent(
     describeError: dependencies.redaction.message,
   });
 
-  // Build choice criteria from dynamic candidates or built-in defaults
   const criteria: ChoiceCriteria = {};
-  if (context.candidates && context.candidates.length > 0) {
-    for (const candidate of context.candidates) {
-      const routing = dependencies.redaction.json(candidate.routing);
-      criteria[candidate.id] = routing.value;
-      redactions += routing.count;
-    }
-  } else {
-    Object.assign(criteria, BUILTIN_ROUTING_CRITERIA);
+  for (const candidate of context.candidates) {
+    const routing = dependencies.redaction.json(candidate.routing);
+    criteria[candidate.id] = routing.value;
+    redactions += routing.count;
   }
-  criteria.cannot_tell = CANNOT_TELL_WHEN;
+  criteria[CANNOT_TELL] = CANNOT_TELL_WHEN;
   const labels = Object.keys(criteria);
 
   const frame = createFrame({
@@ -143,7 +112,6 @@ export async function routeIntent(
         diff: context.diff,
         input: context.input,
         capabilities: context.capabilities,
-        options: context.options,
       },
     },
     questions: {
@@ -167,12 +135,16 @@ export async function routeIntent(
   const margin = selectedProb - Math.max(...alternatives);
   let outcome: string = selected;
   let reason: RoutingDecision["reason"] = "selected";
-  if (selected === "cannot_tell") reason = "cannot_tell";
+  if (selected === CANNOT_TELL) reason = "cannot_tell";
   else if (context.capabilities[selected] !== true) {
-    outcome = "cannot_tell";
+    outcome = CANNOT_TELL;
     reason = "unavailable";
-  } else if (answer.confidence < MIN_CONFIDENCE || selectedProb < MIN_PROBABILITY || margin < MIN_MARGIN) {
-    outcome = "cannot_tell";
+  } else if (
+    answer.confidence < ROUTING_POLICY.minConfidence ||
+    selectedProb < ROUTING_POLICY.minProbability ||
+    margin < ROUTING_POLICY.minMargin
+  ) {
+    outcome = CANNOT_TELL;
     reason = "model_uncertain";
   }
 

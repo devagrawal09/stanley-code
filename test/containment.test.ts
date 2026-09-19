@@ -1,6 +1,6 @@
 /**
  * Regression tests for the trust and lifecycle findings recorded in docs/decision-log.md (D-14): containment
- * of candidate loading, atomic stale-lock takeover, bounded claim loops, and the plugin-directory guard around
+ * of candidate loading, atomic stale-lock takeover, bounded claim loops, and the workflow-directory guard around
  * delegated task agents.
  */
 import assert from "node:assert/strict";
@@ -18,10 +18,10 @@ import {
   runImprovementWorker,
 } from "../src/adapters/improvements.ts";
 import {
-  PLUGIN_DIRECTORY,
-  pluginDirectoryChanges,
-  pluginDirectoryFingerprint,
-} from "../src/adapters/plugins.ts";
+  WORKFLOW_DIRECTORY,
+  workflowDirectoryChanges,
+  workflowDirectoryFingerprint,
+} from "../src/adapters/workflows.ts";
 import { runCli } from "../src/cli.ts";
 import { createImprovementJob } from "../src/workflows/improve.ts";
 import { fake, tempRepo } from "./helpers.ts";
@@ -141,41 +141,44 @@ describe("worker lifecycle", () => {
   });
 });
 
-describe("plugin-directory guard around delegation", () => {
-  test("fingerprints detect added, modified, and removed plugin files", async () => {
-    const r = tempRepo({ [`${PLUGIN_DIRECTORY}/keep.ts`]: "a", [`${PLUGIN_DIRECTORY}/gone.ts`]: "b" });
+describe("workflow-directory guard around delegation", () => {
+  test("fingerprints detect added, modified, and removed workflow files", async () => {
+    const r = tempRepo({ [`${WORKFLOW_DIRECTORY}/keep.ts`]: "a", [`${WORKFLOW_DIRECTORY}/gone.ts`]: "b" });
     try {
-      const before = await pluginDirectoryFingerprint(r.root);
-      r.write({ [`${PLUGIN_DIRECTORY}/keep.ts`]: "changed", [`${PLUGIN_DIRECTORY}/pkg/index.ts`]: "new" });
-      const { rmSync } = await import("node:fs");
-      rmSync(join(r.root, PLUGIN_DIRECTORY, "gone.ts"));
-      const after = await pluginDirectoryFingerprint(r.root);
-      assert.deepEqual(pluginDirectoryChanges(before, after), {
-        added: [`${PLUGIN_DIRECTORY}/pkg/index.ts`],
-        modified: [`${PLUGIN_DIRECTORY}/keep.ts`],
-        removed: [`${PLUGIN_DIRECTORY}/gone.ts`],
+      const before = await workflowDirectoryFingerprint(r.root);
+      r.write({
+        [`${WORKFLOW_DIRECTORY}/keep.ts`]: "changed",
+        [`${WORKFLOW_DIRECTORY}/pkg/index.ts`]: "new",
       });
-      assert.deepEqual(await pluginDirectoryFingerprint(tempRepo({ x: "y" }).root), new Map());
+      const { rmSync } = await import("node:fs");
+      rmSync(join(r.root, WORKFLOW_DIRECTORY, "gone.ts"));
+      const after = await workflowDirectoryFingerprint(r.root);
+      assert.deepEqual(workflowDirectoryChanges(before, after), {
+        added: [`${WORKFLOW_DIRECTORY}/pkg/index.ts`],
+        modified: [`${WORKFLOW_DIRECTORY}/keep.ts`],
+        removed: [`${WORKFLOW_DIRECTORY}/gone.ts`],
+      });
+      assert.deepEqual(await workflowDirectoryFingerprint(tempRepo({ x: "y" }).root), new Map());
     } finally {
       r.cleanup();
     }
   });
 
-  test("a delegated agent cannot install a plugin: added files are quarantined, edits elsewhere are kept", async () => {
+  test("a delegated agent cannot install a workflow: added files are quarantined, edits elsewhere are kept", async () => {
     const existing =
       'export default async () => ({ id: "existing", instructions: "e", run() { return "e"; } });\n';
     const r = tempRepo({
       "src/a.ts": "export const a = 1;\n",
-      [`${PLUGIN_DIRECTORY}/existing.ts`]: existing,
+      [`${WORKFLOW_DIRECTORY}/existing.ts`]: existing,
     });
     try {
       const agent = createFakeAgent((task) => {
         writeFileSync(join(task.cwd, "src/legit.ts"), "export const legit = true;\n");
         writeFileSync(
-          join(task.cwd, PLUGIN_DIRECTORY, "sneaky.ts"),
+          join(task.cwd, WORKFLOW_DIRECTORY, "sneaky.ts"),
           'export default async () => ({ id: "sneaky", instructions: "s", run() { return "s"; } });\n',
         );
-        writeFileSync(join(task.cwd, PLUGIN_DIRECTORY, "existing.ts"), `${existing}// tampered\n`);
+        writeFileSync(join(task.cwd, WORKFLOW_DIRECTORY, "existing.ts"), `${existing}// tampered\n`);
         return { text: "deployed" };
       });
       let stdout = "";
@@ -203,19 +206,19 @@ describe("plugin-directory guard around delegation", () => {
         notChecked.some((n) => n.includes("existing.ts") && n.includes("not restored")),
         notChecked.join("\n"),
       );
-      assert.match(stderr, /warning: the agent added 1 file\(s\) under \.stanley\/plugins\//);
-      assert.match(stderr, /warning: the agent changed trusted plugin files/);
+      assert.match(stderr, /warning: the agent added 1 file\(s\) under \.stanley\/workflows\//);
+      assert.match(stderr, /warning: the agent changed trusted workflow files/);
 
-      assert.ok(!existsSync(join(r.root, PLUGIN_DIRECTORY, "sneaky.ts")), "not activated");
+      assert.ok(!existsSync(join(r.root, WORKFLOW_DIRECTORY, "sneaky.ts")), "not activated");
       const quarantine = join(r.root, QUARANTINE_DIRECTORY);
       const [stamp] = readdirSync(quarantine);
       assert.ok(stamp);
       assert.match(readFileSync(join(quarantine, stamp, "sneaky.ts"), "utf8"), /id: "sneaky"/);
       assert.ok(existsSync(join(r.root, "src/legit.ts")), "legitimate task edits are preserved");
-      assert.match(readFileSync(join(r.root, PLUGIN_DIRECTORY, "existing.ts"), "utf8"), /tampered/);
+      assert.match(readFileSync(join(r.root, WORKFLOW_DIRECTORY, "existing.ts"), "utf8"), /tampered/);
       assert.match(
         r.git("status", "--porcelain"),
-        /^ M \.stanley\/plugins\/existing\.ts$/m,
+        /^ M \.stanley\/workflows\/existing\.ts$/m,
         "visible to Git for review",
       );
     } finally {

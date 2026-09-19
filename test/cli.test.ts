@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { Readable } from "node:stream";
 import { describe, test } from "node:test";
 import { fakeChoice, fakeNoul, fakeScore } from "../src/adapters/fake-jev.ts";
-import { WORKFLOWS } from "../src/cli/registry.ts";
-import { ROUTER_OUTCOMES, type WorkflowName } from "../src/cli/router.ts";
+import { BUILTINS, type BuiltinName } from "../src/cli/builtins.ts";
+import { CANNOT_TELL } from "../src/cli/router.ts";
 import { runCli } from "../src/cli.ts";
 import type { JevPort as JevAdapter } from "../src/core/types.ts";
 import { fake, fixture, type Responder, tempRepo } from "./helpers.ts";
@@ -12,7 +13,13 @@ import { fake, fixture, type Responder, tempRepo } from "./helpers.ts";
 async function cli(
   root: string,
   args: string[],
-  extra: { adapter?: JevAdapter; stdin?: string; env?: NodeJS.ProcessEnv; signal?: AbortSignal } = {},
+  extra: {
+    adapter?: JevAdapter;
+    stdin?: string;
+    env?: NodeJS.ProcessEnv;
+    signal?: AbortSignal;
+    budget?: { requests?: number };
+  } = {},
 ) {
   let stdout = "";
   let stderr = "";
@@ -28,14 +35,20 @@ async function cli(
     {
       ...(extra.adapter ? { adapter: extra.adapter } : {}),
       ...(extra.signal ? { signal: extra.signal } : {}),
+      ...(extra.budget ? { budget: extra.budget } : {}),
     },
   );
   return { code, stdout, stderr };
 }
 
-function routed(route: WorkflowName, respond: Responder = () => undefined) {
+/** The router's choice labels: every built-in plus the reserved fallback. */
+const ROUTE_LABELS = [...Object.keys(BUILTINS), CANNOT_TELL];
+
+function routed(route: BuiltinName, respond: Responder = () => undefined, confidence = 0.9) {
   return fake((name, question, request) =>
-    name === "route" ? fakeChoice(ROUTER_OUTCOMES, route, 0.9) : respond(name, question, request),
+    name === "route" && question.type === "choice"
+      ? fakeChoice(Object.keys(question.criteria), route, confidence)
+      : respond(name, question, request),
   );
 }
 
@@ -43,18 +56,22 @@ function repo() {
   const r = tempRepo({
     "src/a.ts": "export const a = 1;\n",
     "notes/criteria.md": "- a is two\n",
-    "notes/rules.json": JSON.stringify({
-      version: 1,
-      rules: [{ id: "no-magic", class: "semantic", text: "No magic numbers.", scope: ["src/**"] }],
-    }),
+    "notes/rules.json": JSON.stringify(
+      {
+        version: 1,
+        rules: [{ id: "no-magic", class: "semantic", text: "No magic numbers.", scope: ["src/**"] }],
+      },
+      null,
+      2,
+    ),
   });
   r.write({ "src/a.ts": "export const a = 2;\n" });
   return r;
 }
 
 describe("cli", () => {
-  test("the internal routing targets are the ten typed workflows", () => {
-    assert.deepEqual(Object.keys(WORKFLOWS), [
+  test("the built-in routing targets are the ten typed workflows", () => {
+    assert.deepEqual(Object.keys(BUILTINS), [
       "find",
       "check",
       "triage_failures",
@@ -66,13 +83,13 @@ describe("cli", () => {
       "performance_review",
       "compatibility_review",
     ]);
-    assert.equal(WORKFLOWS.find.run.name, "find");
-    assert.equal(WORKFLOWS.check.run.name, "check");
-    assert.equal(WORKFLOWS.triage_failures.run.name, "triageFailures");
-    assert.equal(WORKFLOWS.triage_comments.run.name, "triageComments");
-    assert.equal(WORKFLOWS.review.run.name, "review");
-    assert.equal(WORKFLOWS.test_gaps.run.name, "testGaps");
-    assert.equal(WORKFLOWS.summarize.run.name, "summarize");
+    assert.equal(BUILTINS.find.run.name, "find");
+    assert.equal(BUILTINS.check.run.name, "check");
+    assert.equal(BUILTINS.triage_failures.run.name, "triageFailures");
+    assert.equal(BUILTINS.triage_comments.run.name, "triageComments");
+    assert.equal(BUILTINS.review.run.name, "review");
+    assert.equal(BUILTINS.test_gaps.run.name, "testGaps");
+    assert.equal(BUILTINS.summarize.run.name, "summarize");
   });
 
   test("help exposes one natural-language entry point and no command or override grammar", async () => {
@@ -98,17 +115,15 @@ describe("cli", () => {
     }
   });
 
-  test("routes natural requests with diff, input shape, capabilities, and option names as bounded context", async () => {
+  test("routes natural requests with diff, input shape, and capabilities as bounded context", async () => {
     const r = repo();
     try {
       const adapter = routed("check", (name) =>
         name === "task_relation" ? fakeScore(4, 3, 0.9) : undefined,
       );
-      const result = await cli(
-        r.root,
-        ["Check whether the change sets a to two", "--task-source", "user", "--json", "--no-persist"],
-        { adapter },
-      );
+      const result = await cli(r.root, ["Check whether the change sets a to two", "--json", "--no-persist"], {
+        adapter,
+      });
       assert.equal(result.code, 0, result.stderr);
       const envelope = JSON.parse(result.stdout);
       assert.equal(envelope.schema, "stanley.prompt-result/v1");
@@ -119,7 +134,7 @@ describe("cli", () => {
       const routeQuestion = routing.questions.route!;
       assert.equal(routeQuestion.type, "choice");
       if (routeQuestion.type !== "choice") assert.fail("route must be a choice question");
-      assert.deepEqual(Object.keys(routeQuestion.criteria), ROUTER_OUTCOMES);
+      assert.deepEqual(Object.keys(routeQuestion.criteria), ROUTE_LABELS);
       assert.deepEqual(routing.state.context, {
         diff: "present",
         input: "none",
@@ -135,7 +150,6 @@ describe("cli", () => {
           performance_review: true,
           compatibility_review: true,
         },
-        options: ["task-source"],
       });
       assert.equal(routing.state.request, "Check whether the change sets a to two");
     } finally {
@@ -145,7 +159,7 @@ describe("cli", () => {
 
   test("dispatches every specialized diff request to its typed workflow", async () => {
     const r = repo();
-    const cases: Array<[WorkflowName, string]> = [
+    const cases: Array<[BuiltinName, string]> = [
       ["review", "Review these changes for correctness bugs"],
       ["test_gaps", "What important tests are missing from this diff?"],
       ["summarize", "Summarize what changed"],
@@ -155,7 +169,7 @@ describe("cli", () => {
     ];
     try {
       for (const [workflow, request] of cases) {
-        const result = await cli(r.root, [request, "--max-hunks", "1", "--json", "--no-persist"], {
+        const result = await cli(r.root, [request, "--json", "--no-persist"], {
           adapter: routed(workflow),
         });
         assert.equal(result.code, 0, `${workflow}: ${result.stderr}`);
@@ -169,10 +183,10 @@ describe("cli", () => {
     }
   });
 
-  test("routes action requests to repository plugins and always cleans them up", async () => {
+  test("routes action requests to repository workflows and always cleans them up", async () => {
     const r = repo();
     r.write({
-      ".stanley/plugins/fixer.ts": `
+      ".stanley/workflows/fixer.ts": `
         import { writeFile } from "node:fs/promises";
         import { join } from "node:path";
         export default async ({ root, signal: initSignal }: { root: string; signal: AbortSignal }) => ({
@@ -183,7 +197,7 @@ describe("cli", () => {
           async run({ request, input, signal }: { request: string; input?: unknown; signal: AbortSignal }) {
             return { request, input: input ?? null, changed: true, sameSignal: signal === initSignal };
           },
-          async cleanup() { await writeFile(join(root, "plugin-cleaned"), "yes"); },
+          async cleanup() { await writeFile(join(root, "workflow-cleaned"), "yes"); },
         });
       `,
     });
@@ -206,7 +220,7 @@ describe("cli", () => {
         sameSignal: true,
       });
       assert.ok(!("workflow" in envelope));
-      assert.equal(readFileSync(`${r.root}/plugin-cleaned`, "utf8"), "yes");
+      assert.equal(readFileSync(`${r.root}/workflow-cleaned`, "utf8"), "yes");
       const route = adapter.requests[0]!.questions.route;
       assert.equal(route?.type, "choice");
       if (route?.type === "choice") {
@@ -221,10 +235,10 @@ describe("cli", () => {
     }
   });
 
-  test("repository plugins compose built-ins through late-bound nested prompts", async () => {
+  test("repository workflows compose built-ins through late-bound nested prompts", async () => {
     const r = tempRepo({
       "src/a.ts": "export const a = 1;\n",
-      ".stanley/plugins/orchestrator.ts": `
+      ".stanley/workflows/orchestrator.ts": `
         import { writeFile } from "node:fs/promises";
         import { join } from "node:path";
         export default async ({ root }: { root: string }) => ({
@@ -285,7 +299,7 @@ describe("cli", () => {
       assert.equal(ambiguous.stderr, "");
 
       const uncertain = await cli(changed.root, ["Find the relevant code"], {
-        adapter: fake((name) => (name === "route" ? fakeChoice(ROUTER_OUTCOMES, "find", 0.4) : undefined)),
+        adapter: routed("find", () => undefined, 0.4),
       });
       assert.equal(uncertain.code, 64);
       assert.match(uncertain.stdout, /No installed workflow can confidently handle/);
@@ -326,6 +340,39 @@ describe("cli", () => {
     }
   });
 
+  test("treats safe untracked files as a present diff, exactly as the workflows load them", async () => {
+    const r = tempRepo({ "src/a.ts": "export const a = 1;\n" });
+    try {
+      // Only untracked changes: a new source file and a secret-shaped file that workflows exclude.
+      r.write({ "src/new.ts": "export const fresh = true;\n", ".env": "TOKEN=secret\n" });
+      const adapter = routed("summarize");
+      const result = await cli(r.root, ["Summarize what changed", "--json", "--no-persist"], { adapter });
+      assert.equal(result.code, 0, result.stderr);
+      const envelope = JSON.parse(result.stdout);
+      assert.equal(envelope.status, "complete");
+      assert.equal((adapter.requests[0]!.state.context as { diff: string }).diff, "present");
+      assert.ok(
+        envelope.output.data.results.some((row: { path: string }) => row.path === "src/new.ts"),
+        "the untracked file is what gets summarized",
+      );
+
+      // A repository whose only untracked file is excluded has no diff to route to.
+      const secretOnly = tempRepo({ "src/a.ts": "export const a = 1;\n" });
+      try {
+        secretOnly.write({ ".env": "TOKEN=secret\n" });
+        const gated = routed("summarize");
+        const absent = await cli(secretOnly.root, ["Summarize what changed", "--json"], { adapter: gated });
+        assert.equal(absent.code, 64);
+        assert.equal((gated.requests[0]!.state.context as { diff: string }).diff, "absent");
+        assert.match(JSON.parse(absent.stdout).output.text, /no current diff/i);
+      } finally {
+        secretOnly.cleanup();
+      }
+    } finally {
+      r.cleanup();
+    }
+  });
+
   test("falls back when route answers are outside the candidate set", async () => {
     const r = repo();
     try {
@@ -352,8 +399,9 @@ describe("cli", () => {
       assert.equal(adapter.requests.length, 2);
 
       const budgetAdapter = fake(outsideRoute);
-      const exhausted = await cli(r.root, ["Explain this code", "--max-requests", "1", "--json"], {
+      const exhausted = await cli(r.root, ["Explain this code", "--json"], {
         adapter: budgetAdapter,
+        budget: { requests: 1 },
       });
       assert.equal(exhausted.code, 12);
       const budgetResult = JSON.parse(exhausted.stdout);
@@ -371,30 +419,37 @@ describe("cli", () => {
       const adapter = routed("check", (name) =>
         name === "task_relation" ? fakeScore(4, 3, 0.9) : undefined,
       );
+      // The request is the task; the one generic input is read as acceptance criteria here.
       const json = await cli(
         r.root,
-        [
-          "Check the change against the task and requirements",
-          "--task",
-          "set a to two",
-          "--criteria-file",
-          "notes/criteria.md",
-          "--rules",
-          "notes/rules.json",
-          "--json",
-          "--no-persist",
-        ],
+        ["Check that a is set to two", "--input", "notes/criteria.md", "--json", "--no-persist"],
         { adapter },
       );
       assert.equal(json.code, 0, json.stderr);
       const envelope = JSON.parse(json.stdout);
       assert.equal(envelope.schema, "stanley.prompt-result/v1");
       assert.equal(envelope.status, "complete");
-      assert.deepEqual(envelope.output.data.summary.sections, ["task", "rules", "criteria"]);
+      assert.deepEqual(envelope.output.data.summary.sections, ["task", "criteria"]);
       assert.deepEqual(
         [...new Set(envelope.output.data.results.map((result: { section: string }) => result.section))],
-        ["task", "rules", "criteria"],
+        ["task", "criteria"],
       );
+      const taskFrame = adapter.requests.find((request) => "diffManifest" in request.state)!;
+      assert.equal((taskFrame.state.task as { text: string }).text, "Check that a is set to two");
+
+      // The same input slot carries a project-rules document when it has the rules shape.
+      const rules = await cli(
+        r.root,
+        ["Check that a is set to two", "--input", "notes/rules.json", "--json"],
+        { adapter },
+      );
+      assert.equal(rules.code, 0, rules.stderr);
+      assert.deepEqual(JSON.parse(rules.stdout).output.data.summary.sections, ["task", "rules"]);
+      const [runDirectory] = readdirSync(join(r.root, ".stanley/runs"));
+      const inputs = JSON.parse(
+        readFileSync(join(r.root, ".stanley/runs", runDirectory!, "inputs.json"), "utf8"),
+      );
+      assert.equal(inputs.inputs.rules.source, "notes/rules.json");
       assert.match(envelope.output.text, /^complete - advisory only/);
       for (const key of [
         "coverage",
@@ -440,7 +495,7 @@ describe("cli", () => {
       assert.ok(triaged.results.every((result: { kind: string }) => result.kind === "failures"));
       assert.equal((failures.requests[0]!.state.context as { input: string }).input, "failure_log");
 
-      const comments = await cli(r.root, ["Sort these review comments", "--no-diff", "--no-persist"], {
+      const comments = await cli(r.root, ["Sort these review comments", "--no-persist"], {
         adapter: routed("triage_comments"),
         stdin: JSON.stringify([{ id: 1, body: "a should be 3", path: "src/a.ts", line: 1 }]),
       });
@@ -452,53 +507,71 @@ describe("cli", () => {
     }
   });
 
-  test("keeps workflow options typed after routing", async () => {
+  test("the public option surface is fixed and minimal; removed workflow flags are rejected", async () => {
     const r = repo();
     try {
-      const both = await cli(
-        r.root,
-        ["Check the requirements", "--criteria", "1. a", "--criteria-file", "notes/criteria.md"],
-        { adapter: routed("check") },
-      );
-      assert.equal(both.code, 64);
-      assert.match(both.stderr, /either --criteria or --criteria-file/);
+      const help = await cli(r.root, ["--help"]);
+      const documented = [...help.stdout.matchAll(/^\s+(?:-\w, )?(--[a-z-]+)/gm)].map((m) => m[1]);
+      assert.deepEqual(documented, [
+        "--input",
+        "--scope",
+        "--base",
+        "--repo",
+        "--json",
+        "--no-persist",
+        "--no-agent",
+        "--help",
+        "--version",
+        "--improve-worker",
+        "--promote-candidate",
+      ]);
+      const removed = [
+        ["--task", "x"],
+        ["--task-file", "notes/criteria.md"],
+        ["--task-source", "user"],
+        ["--rules", "notes/rules.json"],
+        ["--criteria", "1. a"],
+        ["--criteria-file", "notes/criteria.md"],
+        ["--test-results", "notes/criteria.md"],
+        ["--max-hunks", "1"],
+        ["--max-pairs", "1"],
+        ["--max-evidence", "1"],
+        ["--max-items", "1"],
+        ["--max-files", "1"],
+        ["--top", "3"],
+        ["--excerpts"],
+        ["--paths", "src/**"],
+        ["--no-diff"],
+        ["--model", "jev-9"],
+        ["--concurrency", "2"],
+        ["--max-requests", "1"],
+        ["--max-input-tokens", "1"],
+        ["--timeout-seconds", "1"],
+        ["--agent-timeout-seconds", "1"],
+      ];
+      for (const flag of removed) {
+        const adapter = routed("check");
+        const result = await cli(r.root, ["Check the change", ...flag], { adapter });
+        assert.equal(result.code, 64, flag.join(" "));
+        assert.match(result.stderr, /usage error/, flag.join(" "));
+        assert.equal(adapter.requests.length, 0, `${flag[0]} must fail before anything is routed`);
+      }
+      assert.equal((await cli(r.root, ["Check the change", "--scope", "index"])).code, 64);
 
-      const orphan = await cli(r.root, ["Check the requirements", "--test-results", "notes/criteria.md"], {
-        adapter: routed("check"),
-      });
-      assert.equal(orphan.code, 64);
-      assert.match(orphan.stderr, /--test-results needs --criteria/);
-
-      const mismatched = await cli(r.root, ["Find the relevant code", "--rules", "notes/rules.json"], {
+      // Input goes only to workflows that use it; a built-in with no use for it never swallows it silently.
+      const unused = await cli(r.root, ["Find the relevant code", "--input", "notes/criteria.md"], {
         adapter: routed("find"),
       });
-      assert.equal(mismatched.code, 64);
-      assert.match(mismatched.stderr, /--rules is not used/);
-
-      const commentTask = await cli(r.root, ["Triage these comments", "--task", "x"], {
-        adapter: routed("triage_comments"),
-        stdin: JSON.stringify([{ body: "change this" }]),
-      });
-      assert.equal(commentTask.code, 64);
-      assert.match(commentTask.stderr, /--task is not used/);
-
-      assert.equal((await cli(r.root, ["Find code", "--top", "-3"], { adapter: routed("find") })).code, 64);
+      assert.equal(unused.code, 64);
+      assert.match(unused.stderr, /supplied input is not used when the request routes to find/);
     } finally {
       r.cleanup();
     }
   });
 
-  test("enforces one stdin source and workspace containment", async () => {
+  test("enforces workspace containment for the input and the repository", async () => {
     const r = repo();
     try {
-      const twoStdin = await cli(
-        r.root,
-        ["Check the task and criteria", "--task-file", "-", "--criteria-file", "-"],
-        { adapter: routed("check"), stdin: "x" },
-      );
-      assert.equal(twoStdin.code, 64);
-      assert.match(twoStdin.stderr, /only one input may be read from stdin/);
-
       const escaped = await cli(r.root, ["Triage these failures", "--input", "../../etc/passwd", "--json"], {
         adapter: routed("triage_failures"),
       });
@@ -507,7 +580,7 @@ describe("cli", () => {
       assert.equal(escapedError.error.kind, "input");
       assert.ok(!("workflow" in escapedError));
 
-      const secret = await cli(r.root, ["Check the criteria", "--criteria-file", ".env"], {
+      const secret = await cli(r.root, ["Check the criteria", "--input", ".env"], {
         adapter: routed("check"),
       });
       assert.equal(secret.code, 65);

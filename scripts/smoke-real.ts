@@ -37,22 +37,11 @@ try {
     'import { price } from "../src/price.js";\ntest("price", () => {\n  expect(price(10)).toBeDefined();\n});\n',
   );
 
-  const result = spawnSync(
-    process.execPath,
-    [
-      cli,
-      "Check whether the current changes give members a 10% discount",
-      "--task",
-      "Give members a 10% discount",
-      "--json",
-      "--no-persist",
-    ],
-    {
-      cwd: root,
-      env: process.env,
-      encoding: "utf8",
-    },
-  );
+  const result = spawnSync(process.execPath, [cli, "Give members a 10% discount", "--json", "--no-persist"], {
+    cwd: root,
+    env: process.env,
+    encoding: "utf8",
+  });
   const packet = JSON.parse(result.stdout) as {
     status: string;
     coverage: Record<string, unknown>;

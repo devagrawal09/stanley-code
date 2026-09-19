@@ -1,5 +1,8 @@
 import type { Packet } from "../workflows/types.ts";
 
+/** A command-line mistake: exit 64 with the usage line. */
+export class UsageError extends Error {}
+
 export const EXIT = {
   ok: 0,
   incomplete: 10,

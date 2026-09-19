@@ -19,7 +19,7 @@ import {
   spawnImprovementWorker,
   workerRunning,
 } from "../src/adapters/improvements.ts";
-import { loadPlugins, PLUGIN_DIRECTORY } from "../src/adapters/plugins.ts";
+import { loadWorkflows, WORKFLOW_DIRECTORY } from "../src/adapters/workflows.ts";
 import { runCli } from "../src/cli.ts";
 import {
   createImprovementJob,
@@ -32,7 +32,7 @@ import { fake, tempRepo } from "./helpers.ts";
 const REQUEST = "Audit the TODO comments in this repository";
 const RESERVED = ["find", "check", "summarize"];
 
-const candidatePlugin = (id = "todo_audit") => `export default async () => ({
+const candidateWorkflow = (id = "todo_audit") => `export default async () => ({
   id: "${id}",
   instructions: "Use when the user asks to audit or list TODO comments in the repository.",
   examples: ["Audit the TODO comments"],
@@ -82,8 +82,8 @@ describe("improvement jobs", () => {
     assert.match(job.id, /^imp_[0-9a-f]{12}$/);
     const brief = improvementInstructions(job, {
       candidateDirectory: `.stanley/candidates/${job.id}`,
-      pluginDirectory: PLUGIN_DIRECTORY,
-      existingPlugins: [".stanley/plugins/notes.ts"],
+      workflowDirectory: WORKFLOW_DIRECTORY,
+      existingWorkflows: [".stanley/workflows/notes.ts"],
       reservedIds: RESERVED,
       exampleWorkflow: EXAMPLE_WORKFLOW,
     });
@@ -91,7 +91,7 @@ describe("improvement jobs", () => {
       `.stanley/candidates/${job.id}/<workflow-id>.ts`,
       "judge({ scope, state, questions })",
       "prompt(instructions, input?)",
-      ".stanley/plugins/notes.ts",
+      ".stanley/workflows/notes.ts",
       "find, check, summarize",
       REQUEST,
       "write NO file",
@@ -123,12 +123,12 @@ describe("improvement jobs", () => {
 });
 
 describe("improvement worker", () => {
-  test("runs a queued job, validates the agent's workflow with the plugin loader, and records a candidate", async () => {
+  test("runs a queued job, validates the agent's workflow with the workflow loader, and records a candidate", async () => {
     const r = tempRepo({ "src/a.ts": "export const a = 1;\n" });
     try {
       const job = createImprovementJob(REQUEST, "none");
       await enqueueImprovement(r.root, job);
-      const agent = writer((id) => ({ [`${CANDIDATE_DIRECTORY}/${id}/todo_audit.ts`]: candidatePlugin() }));
+      const agent = writer((id) => ({ [`${CANDIDATE_DIRECTORY}/${id}/todo_audit.ts`]: candidateWorkflow() }));
       const checked: Array<[string, string]> = [];
       const summary = await worker(r.root, agent, {
         routeCheck: async (candidate: { id: string }, request: string) => {
@@ -145,7 +145,7 @@ describe("improvement worker", () => {
       const record = await readCandidate(r.root, job.id);
       assert.ok(record);
       assert.equal(record.status, "validated");
-      assert.equal(record.pluginId, "todo_audit");
+      assert.equal(record.workflowId, "todo_audit");
       assert.equal(record.source, `${CANDIDATE_DIRECTORY}/${job.id}/todo_audit.ts`);
       assert.deepEqual(record.checks, {
         loaded: true,
@@ -186,7 +186,7 @@ describe("improvement worker", () => {
         {
           request: "outside",
           files: (id) => ({
-            [`${CANDIDATE_DIRECTORY}/${id}/todo_audit.ts`]: candidatePlugin("outside_writer"),
+            [`${CANDIDATE_DIRECTORY}/${id}/todo_audit.ts`]: candidateWorkflow("outside_writer"),
             "src/a.ts": "export const a = 2;\n",
             "src/new.ts": "export const n = 1;\n",
           }),
@@ -204,15 +204,15 @@ describe("improvement worker", () => {
         },
         {
           request: "duplicate",
-          files: (id) => ({ [`${CANDIDATE_DIRECTORY}/${id}/find.ts`]: candidatePlugin("find") }),
+          files: (id) => ({ [`${CANDIDATE_DIRECTORY}/${id}/find.ts`]: candidateWorkflow("find") }),
           expect: /workflow id find is already registered/,
           check: (record) => assert.equal(record.checks.duplicateId, true),
         },
         {
           request: "two",
           files: (id) => ({
-            [`${CANDIDATE_DIRECTORY}/${id}/one.ts`]: candidatePlugin("one"),
-            [`${CANDIDATE_DIRECTORY}/${id}/two.ts`]: candidatePlugin("two"),
+            [`${CANDIDATE_DIRECTORY}/${id}/one.ts`]: candidateWorkflow("one"),
+            [`${CANDIDATE_DIRECTORY}/${id}/two.ts`]: candidateWorkflow("two"),
           }),
           expect: /more than one workflow/,
         },
@@ -239,7 +239,7 @@ describe("improvement worker", () => {
       await enqueueImprovement(r.root, notSelected);
       await worker(
         r.root,
-        writer((id) => ({ [`${CANDIDATE_DIRECTORY}/${id}/todo_audit.ts`]: candidatePlugin("unselected") })),
+        writer((id) => ({ [`${CANDIDATE_DIRECTORY}/${id}/todo_audit.ts`]: candidateWorkflow("unselected") })),
         { routeCheck: async () => false },
       );
       const record = await readCandidate(r.root, notSelected.id);
@@ -261,7 +261,7 @@ describe("improvement worker", () => {
         if (calls === 1) return { outcome: "timeout" };
         const id = /imp_[0-9a-f]{12}/.exec(task.instructions)![0];
         mkdirSync(join(task.cwd, CANDIDATE_DIRECTORY, id), { recursive: true });
-        writeFileSync(join(task.cwd, CANDIDATE_DIRECTORY, id, "todo_audit.ts"), candidatePlugin());
+        writeFileSync(join(task.cwd, CANDIDATE_DIRECTORY, id, "todo_audit.ts"), candidateWorkflow());
         return { text: "second try" };
       });
       const summary = await worker(r.root, agent);
@@ -300,7 +300,7 @@ describe("improvement worker", () => {
       const lock = join(r.root, IMPROVEMENT_DIRECTORY, "worker.lock");
       writeFileSync(lock, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }));
       assert.equal(await workerRunning(r.root), true);
-      const agent = writer((id) => ({ [`${CANDIDATE_DIRECTORY}/${id}/todo_audit.ts`]: candidatePlugin() }));
+      const agent = writer((id) => ({ [`${CANDIDATE_DIRECTORY}/${id}/todo_audit.ts`]: candidateWorkflow() }));
       assert.deepEqual(await worker(r.root, agent), { ran: false, reason: "locked", processed: [] });
       assert.equal(agent.calls.length, 0);
 
@@ -389,7 +389,7 @@ describe("candidate promotion and the closed loop", () => {
 
       // 2. The worker (normally the detached process) turns the request into a validated candidate.
       const improving = writer((jobId) => ({
-        [`${CANDIDATE_DIRECTORY}/${jobId}/todo_audit.ts`]: candidatePlugin(),
+        [`${CANDIDATE_DIRECTORY}/${jobId}/todo_audit.ts`]: candidateWorkflow(),
       }));
       const workerIo = io();
       const workerCode = await runCli(["--improve-worker", "--json"], workerIo.io, {
@@ -421,11 +421,11 @@ describe("candidate promotion and the closed loop", () => {
       assert.equal(promotionCode, 0, promotion.out().stderr);
       assert.match(
         promotion.out().stdout,
-        /activated candidate .* as workflow todo_audit at \.stanley\/plugins\/todo_audit\.ts/,
+        /activated candidate .* as workflow todo_audit at \.stanley\/workflows\/todo_audit\.ts/,
       );
       assert.equal(
         r.git("status", "--porcelain", "--untracked-files=all"),
-        "?? .stanley/plugins/todo_audit.ts\n",
+        "?? .stanley/workflows/todo_audit.ts\n",
       );
       assert.equal((await readCandidate(r.root, id))?.status, "promoted");
 
@@ -461,11 +461,11 @@ describe("candidate promotion and the closed loop", () => {
       await enqueueImprovement(r.root, job);
       await worker(
         r.root,
-        writer((id) => ({ [`${CANDIDATE_DIRECTORY}/${id}/todo_audit.ts`]: candidatePlugin() })),
+        writer((id) => ({ [`${CANDIDATE_DIRECTORY}/${id}/todo_audit.ts`]: candidateWorkflow() })),
       );
       await assert.rejects(promoteCandidate(r.root, job.id, ["todo_audit"]), /already registered/);
       r.write({
-        [`${PLUGIN_DIRECTORY}/todo_audit.ts`]: "export default async () => ({ id: 'other', run() {} });\n",
+        [`${WORKFLOW_DIRECTORY}/todo_audit.ts`]: "export default async () => ({ id: 'other', run() {} });\n",
       });
       await assert.rejects(promoteCandidate(r.root, job.id, []), /already exists/);
       assert.equal((await readCandidate(r.root, job.id))?.status, "validated");
@@ -474,13 +474,16 @@ describe("candidate promotion and the closed loop", () => {
     }
   });
 
-  test("the shipped example workflow is the brief's reference and loads through the plugin loader", async () => {
+  test("the shipped example workflow is the brief's reference and loads through the workflow loader", async () => {
     const root = join(import.meta.dirname, "..");
-    assert.equal(readFileSync(join(root, "examples/plugins/stale-todo-audit.ts"), "utf8"), EXAMPLE_WORKFLOW);
-    const result = await loadPlugins({ root, directory: "examples/plugins", warn: () => {} });
+    assert.equal(
+      readFileSync(join(root, "examples/workflows/stale-todo-audit.ts"), "utf8"),
+      EXAMPLE_WORKFLOW,
+    );
+    const result = await loadWorkflows({ root, directory: "examples/workflows", warn: () => {} });
     assert.deepEqual(result.quarantined, []);
     assert.deepEqual(
-      result.loaded.map(({ plugin }) => plugin.id),
+      result.loaded.map(({ workflow }) => workflow.id),
       ["stale_todo_audit"],
     );
   });

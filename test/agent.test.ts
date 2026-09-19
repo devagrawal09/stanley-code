@@ -7,7 +7,7 @@ import { createFakeAgent } from "../src/adapters/fake-agent.ts";
 import { fakeChoice, fakeScore } from "../src/adapters/fake-jev.ts";
 import { CANDIDATE_DIRECTORY, IMPROVEMENT_DIRECTORY } from "../src/adapters/improvements.ts";
 import { NESTED_ENV } from "../src/adapters/pi.ts";
-import { ROUTER_OUTCOMES, type WorkflowName } from "../src/cli/router.ts";
+import type { BuiltinName } from "../src/cli/builtins.ts";
 import { type CliInjections, runCli } from "../src/cli.ts";
 import { DELEGATION_NOT_CHECKED, delegationInstructions, delegationResult } from "../src/workflows/agent.ts";
 import { CANDIDATE_SCHEMA, improvementJobId } from "../src/workflows/improve.ts";
@@ -35,13 +35,11 @@ async function cli(
   return { code, stdout, stderr };
 }
 
-const routed = (
-  route: WorkflowName | "cannot_tell",
-  confidence = 0.9,
-  respond: Responder = () => undefined,
-) =>
+const routed = (route: BuiltinName | "cannot_tell", confidence = 0.9, respond: Responder = () => undefined) =>
   fake((name, question, request) =>
-    name === "route" ? fakeChoice(ROUTER_OUTCOMES, route, confidence) : respond(name, question, request),
+    name === "route" && question.type === "choice"
+      ? fakeChoice(Object.keys(question.criteria), route, confidence)
+      : respond(name, question, request),
   );
 
 function repo() {
@@ -116,7 +114,7 @@ describe("agent fallback", () => {
       assert.equal(envelope.output.data.toolCalls, 4);
       assert.match(envelope.output.text, /Deployed nothing/);
       assert.ok(!("workflow" in envelope));
-      assert.equal(jev.requests.length, 0, "an action with no plugin never consults the router");
+      assert.equal(jev.requests.length, 0, "an action with no repository workflow never consults the router");
       assert.equal(agent.calls.length, 1);
       assert.equal(agent.calls[0]!.task.kind, "delegate");
       assert.match(agent.calls[0]!.task.instructions, /Task:\nDeploy this branch/);
@@ -255,7 +253,7 @@ describe("agent fallback", () => {
       const agent = createFakeAgent(() => ({ outcome: "timeout", text: `partial ${token}`, detail: "slow" }));
       const result = await cli(
         r.root,
-        ["Deploy this branch", "--json", "--no-persist", "--agent-timeout-seconds", "7"],
+        ["Deploy this branch", "--json", "--no-persist"],
         { adapter: fake(), agent, spawnWorker: () => {} },
         { stdin: "target: staging" },
       );
@@ -264,7 +262,7 @@ describe("agent fallback", () => {
       assert.equal(envelope.status, "incomplete");
       assert.equal(envelope.output.data.outcome, "timeout");
       assert.ok(!result.stdout.includes(token));
-      assert.equal(agent.calls[0]!.options.timeoutMs, 7_000);
+      assert.equal(agent.calls[0]!.options.timeoutMs, 600_000, "the agent time limit is fixed policy");
       assert.match(agent.calls[0]!.task.instructions, /Supplied input:\ntarget: staging/);
       assert.equal(pending(r.root).length, 1);
     } finally {

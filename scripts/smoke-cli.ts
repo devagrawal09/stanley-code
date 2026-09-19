@@ -33,7 +33,7 @@ const adapter = createFakeAdapter((name, question, request) => {
   const labels = Object.keys(question.criteria);
   const prompt = String(request.state.request).toLowerCase();
   let route = "cannot_tell";
-  if (prompt.includes("smoke plugin")) route = "smoke_plugin";
+  if (prompt.includes("smoke workflow")) route = "smoke_workflow";
   else if (prompt.includes("todo") && labels.includes("todo_audit")) route = "todo_audit";
   else if (prompt.includes("failure")) route = "triage_failures";
   else if (prompt.includes("comment")) route = "triage_comments";
@@ -96,7 +96,7 @@ interface Case {
   args: string[];
   expect: number;
   json?: boolean;
-  plugin?: boolean;
+  repository?: boolean;
   error?: RegExp;
   sections?: string[];
   injected?: Injections;
@@ -110,8 +110,8 @@ try {
   git("config", "user.name", "smoke");
   write("src/math.js", "export function add(a, b) {\n  return a + b;\n}\n");
   write(
-    ".stanley/plugins/smoke.ts",
-    'export default async () => ({ id: "smoke_plugin", instructions: "Use for the smoke plugin request.", async run({ request }) { return { plugin: true, request }; } });\n',
+    ".stanley/workflows/smoke.ts",
+    'export default async () => ({ id: "smoke_workflow", instructions: "Use for the smoke workflow request.", async run({ request }) { return { repository: true, request }; } });\n',
   );
   write(
     "test/math.test.js",
@@ -129,7 +129,6 @@ try {
     "FAIL test/math.test.js\n  adds\n    Expected: 3\n    Received: 4\n      at test/math.test.js:3:20\n",
   );
   write("criteria.md", "- add returns the sum\n- add handles overflow\n");
-  write("junit.xml", '<testsuite><testcase classname="math" name="add returns the sum"/></testsuite>');
   write(
     "rules.json",
     JSON.stringify({
@@ -157,25 +156,22 @@ try {
       verify: (_envelope, result) => spawned.length === 0 && agent.calls.length === 0 && result.stderr === "",
     },
     { args: ["Do something vague"], expect: 64, injected: noAgent },
-    { args: ["Run the smoke plugin", "--json", "--no-persist"], expect: 0, json: true, plugin: true },
+    { args: ["Run the smoke workflow", "--json", "--no-persist"], expect: 0, json: true, repository: true },
+    // The one generic input: acceptance criteria or a project-rules document, recognized by shape.
     {
-      args: [
-        "Check the add overflow change against the task and requirements",
-        "--task",
-        "fix add overflow",
-        "--rules",
-        "rules.json",
-        "--criteria-file",
-        "criteria.md",
-        "--test-results",
-        "junit.xml",
-        "--json",
-      ],
+      args: ["Check the add overflow fix against these requirements", "--input", "criteria.md", "--json"],
       expect: 0,
       json: true,
-      sections: ["task", "rules", "criteria"],
+      sections: ["task", "criteria"],
     },
-    { args: ["Check the results", "--test-results", "junit.xml"], expect: 64 },
+    {
+      args: ["Check the add overflow fix against the project rules", "--input", "rules.json", "--json"],
+      expect: 0,
+      json: true,
+      sections: ["task", "rules"],
+    },
+    // The exact Git selection is a host control; nothing is staged here, so the diff-gated check is unavailable.
+    { args: ["Check the staged changes", "--scope", "staged", "--json"], expect: 64, json: true },
     ...(
       [
         "Review these changes for bugs",
@@ -186,7 +182,7 @@ try {
         "Could this break existing consumers?",
       ] as const
     ).map((request) => ({
-      args: [request, "--max-hunks", "10", "--json"],
+      args: [request, "--json"],
       expect: 0,
       json: true,
     })),
@@ -247,7 +243,15 @@ try {
             ].sort((a, b) => a.id.localeCompare(b.id)),
           ),
     },
-    { args: ["Find add", "--rules", "rules.json"], expect: 64 },
+    // Workflow-specific flags do not exist; every semantic instruction lives in the request.
+    { args: ["Find add", "--input", "criteria.md"], expect: 64 },
+    { args: ["Find add", "--top", "5"], expect: 64 },
+    { args: ["Check the change", "--task", "fix add overflow"], expect: 64 },
+    { args: ["Check the change", "--rules", "rules.json"], expect: 64 },
+    { args: ["Check the change", "--max-hunks", "10"], expect: 64 },
+    { args: ["Check the change", "--model", "jev-9"], expect: 64 },
+    { args: ["Triage these failures", "--input", "ci.txt", "--no-diff"], expect: 64 },
+    { args: ["Deploy this branch", "--agent-timeout-seconds", "5"], expect: 64 },
     { args: ["Find add", "--as", "find"], expect: 64 },
     { args: ["Triage failures", "--kind", "failures", "--input", "ci.txt"], expect: 64 },
     { args: ["Check the change", "--offline"], expect: 64 },
@@ -271,10 +275,11 @@ try {
         if (envelope.schema === "stanley.prompt-result/v1") {
           const expectedStatus = test.expect === 64 ? "unsupported" : "complete";
           ok = envelope.status === expectedStatus;
-          if (ok && test.plugin) {
+          if (ok && test.repository) {
             ok =
-              (envelope.output as unknown as { plugin?: boolean; request?: string })?.plugin === true &&
-              (envelope.output as unknown as { request?: string })?.request === "Run the smoke plugin";
+              (envelope.output as unknown as { repository?: boolean; request?: string })?.repository ===
+                true &&
+              (envelope.output as unknown as { request?: string })?.request === "Run the smoke workflow";
           } else if (
             ok &&
             expectedStatus === "complete" &&
@@ -283,7 +288,7 @@ try {
             envelope.output.data !== null &&
             "coverage" in envelope.output.data
           ) {
-            // Built-in packets always list what was not checked; plugin output is checked by `verify`.
+            // Built-in packets always list what was not checked; repository workflow output is checked by `verify`.
             ok =
               typeof envelope.output?.text === "string" &&
               Array.isArray(envelope.output.data?.notChecked) &&
@@ -331,7 +336,7 @@ try {
     failures++;
     console.log("FAIL expected persisted .stanley/ artifacts to exist and be ignored");
   }
-  if (!status.includes("?? .stanley/plugins/todo_audit.ts")) {
+  if (!status.includes("?? .stanley/workflows/todo_audit.ts")) {
     failures++;
     console.log("FAIL expected the promoted workflow to be visible to Git for review");
   }

@@ -3,14 +3,14 @@ import { describe, test } from "node:test";
 import { createRedaction } from "../src/adapters/dependencies.ts";
 import { createFakeAdapter, fakeChoice, fakeNoul, fakeScore } from "../src/adapters/fake-jev.ts";
 import { classifyError } from "../src/adapters/jev.ts";
-import { createPluginJudge } from "../src/cli/judge.ts";
+import { createWorkflowJudge } from "../src/cli/judge.ts";
 import { Budget } from "../src/core/budget.ts";
-import { JUDGE_LIMITS, validateJudgeRequest } from "../src/core/plugin.ts";
+import { JUDGE_LIMITS, validateJudgeRequest } from "../src/core/workflow.ts";
 
 const LIMITS = { requests: 500, inputTokens: 1_000_000, wallMs: 60_000 };
 
 function judgeWith(adapter: ReturnType<typeof createFakeAdapter>, budget = new Budget(LIMITS)) {
-  return createPluginJudge({
+  return createWorkflowJudge({
     jev: adapter,
     model: "jev-1.13.0",
     sharedBudget: budget,
@@ -26,7 +26,7 @@ const questions = {
   risk: { type: "score", instructions: "Risk", criteria: ["none", "low", "high"] },
 } as const;
 
-describe("plugin judge", () => {
+describe("workflow judge", () => {
   test("validates answers of every question type and redacts state before it is sent", async () => {
     const adapter = createFakeAdapter((name) =>
       name === "stale"

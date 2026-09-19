@@ -181,12 +181,12 @@ describe("run executor", () => {
       assert.equal(record.template, "test@1");
       const ignore = join(repo.root, ".stanley/.gitignore");
       assert.ok(existsSync(ignore));
-      assert.equal(readFileSync(ignore, "utf8"), "*\n!plugins/\n!plugins/**\n");
+      assert.equal(readFileSync(ignore, "utf8"), "*\n!workflows/\n!workflows/**\n");
       assert.equal(repo.git("status", "--porcelain"), "");
-      repo.write({ ".stanley/plugins/example.ts": "export default async () => ({});\n" });
+      repo.write({ ".stanley/workflows/example.ts": "export default async () => ({});\n" });
       assert.equal(
         repo.git("status", "--porcelain", "--untracked-files=all"),
-        "?? .stanley/plugins/example.ts\n",
+        "?? .stanley/workflows/example.ts\n",
       );
     } finally {
       if (previous === undefined) delete process.env.TYPESAFE_API_KEY;

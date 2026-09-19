@@ -1,12 +1,17 @@
 import type { Budget } from "../core/budget.ts";
 import { FrameExecutor } from "../core/executor.ts";
 import { createFrame } from "../core/frame.ts";
-import { JUDGE_LIMITS, type JudgeFn, PluginValidationError, validateJudgeRequest } from "../core/plugin.ts";
 import type { JevPort, JsonObject, TransportFailure } from "../core/types.ts";
 import { readAnswers } from "../core/validation.ts";
+import {
+  JUDGE_LIMITS,
+  type JudgeFn,
+  validateJudgeRequest,
+  WorkflowValidationError,
+} from "../core/workflow.ts";
 import type { RedactionPort } from "../workflows/ports.ts";
 
-export interface PluginJudgeOptions {
+export interface WorkflowJudgeOptions {
   readonly jev: JevPort;
   readonly model: string;
   readonly sharedBudget: Budget;
@@ -17,11 +22,11 @@ export interface PluginJudgeOptions {
 }
 
 /**
- * The `judge` primitive handed to plugin runs: the same budgeted, validated, redacted frame executor built-ins
+ * The `judge` primitive handed to workflow runs: the same budgeted, validated, redacted frame executor built-ins
  * use, with a per-run call cap. Requests are validated before anything reaches Jev; answers are validated
  * against the questions asked; failures are returned, never thrown.
  */
-export function createPluginJudge(options: PluginJudgeOptions): JudgeFn {
+export function createWorkflowJudge(options: WorkflowJudgeOptions): JudgeFn {
   const executor = new FrameExecutor({
     port: options.jev,
     model: options.model,
@@ -52,7 +57,7 @@ export function createPluginJudge(options: PluginJudgeOptions): JudgeFn {
     try {
       request = validateJudgeRequest(value);
     } catch (error) {
-      if (error instanceof PluginValidationError)
+      if (error instanceof WorkflowValidationError)
         return { ok: false, reason: "invalid", detail: error.message };
       throw error;
     }
@@ -65,7 +70,7 @@ export function createPluginJudge(options: PluginJudgeOptions): JudgeFn {
       };
     }
     const frame = createFrame({
-      template: "plugin-judge@1",
+      template: "workflow-judge@1",
       scope: request.scope,
       state: request.state,
       questions: request.questions,
