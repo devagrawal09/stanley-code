@@ -292,12 +292,7 @@ export function workflowDirectoryChanges(
  */
 function defaultExport(namespace: Record<string, unknown>): unknown {
   const value = namespace.default;
-  if (
-    "module.exports" in namespace &&
-    typeof value === "object" &&
-    value !== null &&
-    (value as Record<string, unknown>).__esModule === true
-  ) {
+  if (typeof value === "object" && value !== null && (value as Record<string, unknown>).__esModule === true) {
     return (value as Record<string, unknown>).default;
   }
   return value;

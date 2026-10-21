@@ -757,6 +757,24 @@ describe("workflow loading", () => {
     ]);
   });
 
+  test("loads transpiled CommonJS default exports", async () => {
+    const root = repository({
+      "transpiled.js": [
+        'Object.defineProperty(exports, "__esModule", { value: true });',
+        'exports.default = async () => ({ id: "transpiled-cjs", async run() { return "ok"; } });',
+      ].join("\n"),
+    });
+    const warnings: string[] = [];
+    const result = await loadWorkflows({ root, warn: (warning) => warnings.push(warning) });
+
+    assert.deepEqual(warnings, []);
+    assert.deepEqual(result.quarantined, []);
+    assert.deepEqual(
+      result.loaded.map(({ workflow }) => workflow.id),
+      ["transpiled-cjs"],
+    );
+  });
+
   test("quarantines import, factory, and validation failures with visible warnings and keeps the rest", async () => {
     const seen = events();
     const root = repository({
